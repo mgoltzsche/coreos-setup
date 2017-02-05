@@ -1,0 +1,70 @@
+{
+	"directory": "/var/data/pods",
+	"main": "web",
+	"net": "pod-net",
+	"dns": "10.1.0.1",
+	"pods": {
+		"web": {
+			"ports": [
+				{
+					"name": "80-tcp",
+					"port": 80
+				},{
+					"name": "443-tcp",
+					"port": 443
+				}
+			]
+		},
+		"consul": {
+			"dns": "host",
+			"ports": [
+				{
+					"name": "8600-tcp",
+					"ip": "10.1.0.1",
+					"port": 53
+				},{
+					"name": "8600-udp",
+					"ip": "10.1.0.1",
+					"port": 53
+				},{
+					"name": "8500-tcp",
+					"ip": "10.1.0.1",
+					"port": 8500
+				},{
+					"name": "8400-tcp",
+					"ip": "10.1.0.1",
+					"port": 8400
+				},{
+					"name": "8300-tcp",
+					"ip": "10.1.0.1",
+					"port": 8300
+				},{
+					"name": "8301-tcp",
+					"ip": "10.1.0.1",
+					"port": 8301
+				},{
+					"name": "8301-udp",
+					"ip": "10.1.0.1",
+					"port": 8301
+				},{
+					"name": "8302-tcp",
+					"ip": "10.1.0.1",
+					"port": 8302
+				},{
+					"name": "8302-udp",
+					"ip": "10.1.0.1",
+					"port": 8302
+				}
+			]
+		}
+	},
+	"sidekick-services": {
+		"consul": {
+			"image": "docker://consul:0.7.3",
+			"exec": [
+				"/bin/dumb-init", "/bin/sh", "-c",
+				"/usr/local/bin/docker-entrypoint.sh agent -dns-port=53 -bind=0.0.0.0 -client=0.0.0.0 -retry-join=10.1.0.1 -advertise=$(ip -o -4 addr list | grep -Ev '[0-9]+:\\s+lo\\s' | head -1 | grep -Eo '[0-9\\.]+/[0-9]+' | cut -d / -f 1)"
+			]
+		}
+	}
+}

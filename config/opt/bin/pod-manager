@@ -1,0 +1,24 @@
+#!/bin/sh
+
+[ $(id -u) -eq 0 ] || (echo 'Must be run as root!' >&2; false) || exit 1
+
+POD_DIRECTORY="${POD_DIRECTORY:-/var/pods}"
+
+[ -d "$POD_DIRECTORY" ] || (echo "$POD_DIRECTORY does not exist!" >&2; false) || exit 2
+
+isPodServiceConfigured() {
+	[ -f "/etc/systemd/system/multi-user.target.wants/pod-${1}.service" ]
+}
+
+enablePod() {
+	POD_SERVICE="pod-${1}.service"
+	systemctl is-enabled "$POD_SERVICE" >/dev/null 2>/dev/null || return 1
+	ln -s "/etc/systemd/system/multi-user.target.wants/$POD_SERVICE"
+}
+
+disablePod() {
+}
+
+find "$POD_DIRECTORY" -maxdepth 2 -name pod.json | while read POD_FILE; do
+	
+done

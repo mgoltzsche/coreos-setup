@@ -1,0 +1,174 @@
+plain setup (booting)
+##############################
+
+root@rescue ~ # gdisk -l /dev/sda
+GPT fdisk (gdisk) version 0.8.10
+
+Partition table scan:
+  MBR: hybrid
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with hybrid MBR; using GPT.
+Disk /dev/sda: 5860533168 sectors, 2.7 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): 00000000-0000-0000-0000-000000000001
+Partition table holds up to 128 entries
+First usable sector is 34, last usable sector is 9289694
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 8125 sectors (4.0 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            4096          266239   128.0 MiB   EF00  EFI-SYSTEM
+   2          266240          270335   2.0 MiB     EF02  BIOS-BOOT
+   3          270336         2367487   1024.0 MiB  FFFF  USR-A
+   4         2367488         4464639   1024.0 MiB  FFFF  USR-B
+   6         4464640         4726783   128.0 MiB   8300  OEM
+   7         4726784         4857855   64.0 MiB    FFFF  OEM-CONFIG
+   9         4857856         9285631   2.1 GiB     FFFF  ROOT
+
+
+
+plain extended using resize2fs (booting)
+########################################
+
+root@rescue ~ # gdisk -l /dev/sda
+GPT fdisk (gdisk) version 0.8.10
+
+Partition table scan:
+  MBR: hybrid
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with hybrid MBR; using GPT.
+Disk /dev/sda: 5860533168 sectors, 2.7 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): 72C15899-94FF-453F-A505-89FA143B5182
+Partition table holds up to 128 entries
+First usable sector is 34, last usable sector is 5860533134
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 4062 sectors (2.0 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            4096          266239   128.0 MiB   EF00  EFI-SYSTEM
+   2          266240          270335   2.0 MiB     EF02  BIOS-BOOT
+   3          270336         2367487   1024.0 MiB  FFFF  USR-A
+   4         2367488         4464639   1024.0 MiB  FFFF  USR-B
+   6         4464640         4726783   128.0 MiB   8300  OEM
+   7         4726784         4857855   64.0 MiB    FFFF  OEM-CONFIG
+   9         4857856      5860533134   2.7 TiB     FFFF  ROOT
+
+
+
+with replaced root partition and data partition (not booting)
+#############################################################
+
+root@rescue ~ # gdisk -l /dev/sda
+GPT fdisk (gdisk) version 0.8.10
+
+Partition table scan:
+  MBR: hybrid
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with hybrid MBR; using GPT.
+Disk /dev/sda: 5860533168 sectors, 2.7 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): 00000000-0000-0000-0000-000000000001
+Partition table holds up to 12 entries
+First usable sector is 5, last usable sector is 5860533163
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 9126 sectors (4.5 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            4096          266239   128.0 MiB   EF00  EFI-SYSTEM
+   2          266240          270335   2.0 MiB     EF02  BIOS-BOOT
+   3          270336         2367487   1024.0 MiB  FFFF  USR-A
+   4         2367488         4464639   1024.0 MiB  FFFF  USR-B
+   6         4464640         4726783   128.0 MiB   8300  OEM
+   7         4726784         4857855   64.0 MiB    FFFF  OEM-CONFIG
+   9         4857856      2639302655   1.2 TiB     8300  ROOT
+  10      2639302656      5860528128   1.5 TiB     FD00  raid.data.2
+
+
+
+
+
+data partition without changing root partition but resized partition table (not booting)
+########################################################################################
+
+root@rescue ~ # gdisk -l /dev/sda
+GPT fdisk (gdisk) version 0.8.10
+
+Partition table scan:
+  MBR: hybrid
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with hybrid MBR; using GPT.
+Disk /dev/sda: 5860533168 sectors, 2.7 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): 00000000-0000-0000-0000-000000000001
+Partition table holds up to 12 entries
+First usable sector is 5, last usable sector is 5860533163
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 2630026150 sectors (1.2 TiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            4096          266239   128.0 MiB   EF00  EFI-SYSTEM
+   2          266240          270335   2.0 MiB     EF02  BIOS-BOOT
+   3          270336         2367487   1024.0 MiB  FFFF  USR-A
+   4         2367488         4464639   1024.0 MiB  FFFF  USR-B
+   6         4464640         4726783   128.0 MiB   8300  OEM
+   7         4726784         4857855   64.0 MiB    FFFF  OEM-CONFIG
+   9         4857856         9285631   2.1 GiB     FFFF  ROOT
+  10      2639302656      5860528128   1.5 TiB     FD00  raid.data.2
+
+
+
+also not booting with resized partition table (sgdisk /dev/sda -S=9)
+####################################################################
+
+
+
+with changed partitions, changed disk GUID but original partition GUIDs
+#######################################################################
+
+root@rescue ~ # gdisk -l /dev/sda
+GPT fdisk (gdisk) version 0.8.10
+
+Partition table scan:
+  MBR: hybrid
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with hybrid MBR; using GPT.
+Disk /dev/sda: 5860533168 sectors, 2.7 TiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): 997D1654-3D6D-45A3-93EE-D01AE4D57965
+Partition table holds up to 12 entries
+First usable sector is 5, last usable sector is 5860533163
+Partitions will be aligned on 2048-sector boundaries
+Total free space is 9126 sectors (4.5 MiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            4096          266239   128.0 MiB   EF00  EFI-SYSTEM
+   2          266240          270335   2.0 MiB     EF02  BIOS-BOOT
+   3          270336         2367487   1024.0 MiB  FFFF  USR-A
+   4         2367488         4464639   1024.0 MiB  FFFF  USR-B
+   6         4464640         4726783   128.0 MiB   8300  OEM
+   7         4726784         4857855   64.0 MiB    FFFF  OEM-CONFIG
+   9         4857856      2639302655   1.2 TiB     8300  ROOT
+  10      2639302656      5860528128   1.5 TiB     FD00  raid.data.2
+
+
+
+
+
+
+=> USR-A+USR-B are still without file system; /etc/fstab, /etc/mtab are missing

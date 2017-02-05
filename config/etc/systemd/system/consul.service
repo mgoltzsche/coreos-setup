@@ -1,0 +1,31 @@
+[Unit]
+Description=Consul Service Discovery (DNS)
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Slice=machine.slice
+TimeoutStartSec=300
+StandardOutput=journal
+SyslogIdentifier=pod-%i
+ExecStartPre=-/bin/sh -c '/usr/bin/rkt rm --uuid-file=/var/run/pod-%p.uuid; /usr/bin/rm -f /var/run/pod-%p.uuid'
+ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' --insecure-options=image docker://consul:0.7.3 \
+	--name=consul-master \
+	--hostname=consul \
+	--net=pod-net --dns=host \
+	--port=8600-tcp:10.1.0.1:53 --port=8600-udp:10.1.0.1:53 \
+	--port=8500-tcp:10.1.0.1:8500 \
+	--port=8400-tcp:10.1.0.1:8400 \
+	--port=8300-tcp:10.1.0.1:8300 \
+	--port=8301-tcp:10.1.0.1:8301 --port=8301-udp:10.1.0.1:8301 \
+	--port=8302-tcp:10.1.0.1:8302 --port=8302-udp:10.1.0.1:8302 \
+	--exec=/usr/local/bin/docker-entrypoint.sh -- \
+		agent -server -ui -bootstrap-expect 1 -log-level info \
+			-bind 0.0.0.0 -advertise 10.1.0.1 -client 0.0.0.0 -recursor 8.8.8.8
+ExecStartPost=/usr/bin/sh -c 'for SEC in 1 1 5; do if rkt status "$(cat "/var/run/pod-%p.uuid" 2>/dev/null)" | grep -Eq "^state=running"; then /opt/bin/consul-client rktpodip "$(cat "/var/run/pod-%p.uuid")" > /var/run/consul-ip; exit 0; fi; if rkt status "$(cat "/var/run/pod-%p.uuid" 2>/dev/null)" | grep -Eq "^state=exited"; then exit 1; fi; sleep $SEC; done; exit 2'
+ExecStopPost=/usr/bin/rkt gc --mark-only
+KillMode=process
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

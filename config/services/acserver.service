@@ -1,0 +1,21 @@
+[Unit]
+Description=App Container Image (ACI) server
+Requires=consul.service
+After=consul.service
+
+[Service]
+Slice=machine.slice
+ExecStartPre=-/bin/sh -c '/usr/bin/rkt rm --uuid-file=/var/run/pod-%p.uuid; /usr/bin/rm -f /var/run/pod-%p.uuid'
+ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' \
+	--net=pod-net --dns=10.1.0.1 --dns-search=service.dc1.consul \
+	--set-env=USERNAME=max --set-env=PASSWORD=publ!sh \
+	--insecure-options=image docker://carrotgarden/aci-serv
+ExecStartPost=/opt/bin/consul-client rktregister /var/run/pod-%p.uuid
+ExecStopPost=/opt/bin/consul-client rktderegister /var/run/pod-%p.uuid
+ExecStopPost=/usr/bin/rkt gc --mark-only
+KillMode=mixed
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+

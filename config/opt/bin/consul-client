@@ -1,0 +1,140 @@
+#!/bin/sh
+
+[ $(id -u) -eq 0 ] || (echo 'Must be run as root' >&2; false) || exit 1
+
+CONSUL_HOST=${CONSUL_HOST:-10.1.0.1:8500}
+DATACENTER="${DATACENTER:-dc1}"
+NODE="${NODE:-alpha}"
+NODE_IP="${NODE_IP}"
+
+[ "$DATACENTER" ] || (echo "Missing DATACENTER env var" >&2; false) || exit 1
+[ "$NODE" ] || (echo "Missing NODE env var" >&2; false) || exit 1
+
+usage() {
+	cat >&2 <<-EOF
+		Usage:
+		  $0 list
+		  $0 show NAMEORID
+		  $0 register INSTANCEID PODNAME APPNAME IP PORT
+		  $0 deregister INSTANCEID
+		  $0 rktregister RKT_POD_UUID_FILE
+		  $0 rktderegister RKT_POD_UUID_FILE
+		Environment:
+		  DATACENTER=$DATACENTER
+		  NODE=$NODE
+		  CONSUL_HOST=$CONSUL_HOST
+	EOF
+}
+
+wanIP() {
+	dig +short myip.opendns.com @resolver1.opendns.com
+}
+
+list() {
+	curl -X GET "http://$CONSUL_HOST/v1/catalog/services?dc=$DATACENTER" -m 20
+}
+
+show() {
+	curl -X GET "http://$CONSUL_HOST/v1/catalog/service/$1?dc=$DATACENTER" -m 20
+}
+
+register() {
+	curl -X PUT "http://$CONSUL_HOST/v1/catalog/register" -m 10 -d @- <<-EOF
+		{
+		  "Datacenter": "$DATACENTER",
+		  "Node": "$1",
+		  "Address": "$3",
+		  "TaggedAddresses": {
+		    "lan": "$3",
+		    "wan": "$(wanIP)"
+		  },
+		  "Service": {
+		    "ID": "$1-$2",
+		    "Service": "$2",
+		    "Tags": [],
+		    "Address": "$3",
+		    "Port": ${4:-0}
+		  }
+		}
+	EOF
+}
+
+deregister() {
+	curl -X PUT "http://$CONSUL_HOST/v1/catalog/deregister" -m 10 -d @- <<-EOF
+		{
+		  "Datacenter": "$DATACENTER",
+		  "Node": "$1"
+		}
+	EOF
+}
+
+rktwait() {
+	for SEC in 1 1 3 5; do
+		cat "$1"
+		if rkt status "$(cat "$1" 2>/dev/null)" | grep -Eq '^state=running'; then
+			return 0
+		elif rkt status "$(cat "$1" 2>/dev/null)" | grep -Eq '^state=exited'; then
+			echo 'Pod exited' >&2
+			return 1
+		fi
+		sleep $SEC
+	done
+	echo 'Timed out while waiting for pod' >&2
+	return 1
+}
+
+rktregister() {
+	(rktwait "$1" || (echo 'Cannot register pod for service discovery since bootstrap timed out or it exited' >&2; false)) &&
+	POD_UUID="$(cat "$1")" &&
+	POD_IP="$(rktpodip "$POD_UUID")" &&
+	POD_MANIFEST="$(rkt cat-manifest "$POD_UUID")" &&
+	APP_COUNT=$(echo "$POD_MANIFEST" | jq -r '.apps | length') || return 1
+	APP_INDEX=0
+	while [ $APP_INDEX -lt ${APP_COUNT:-0} ]; do
+		APP_JSON="$(echo "$POD_MANIFEST" | jq -r ".apps[$APP_INDEX]")"
+		APP_NAME="$(echo "$APP_JSON" | jq -r ".name")"
+		PORT_COUNT="$(echo "$APP_JSON" | jq -r ".app.ports | length")"
+		if [ "$PORT_COUNT" -gt 0 ]; then
+			APP_PORT1="$(echo "$APP_JSON" | jq -r ".app.ports[0]?.port?")"
+			register "rkt-$POD_UUID" "$APP_NAME" "$POD_IP" "$APP_PORT1"
+			PORT_INDEX=0
+			while [ $PORT_INDEX -lt $PORT_COUNT ]; do
+				PORT_JSON="$(echo "$POD_MANIFEST" | jq -r ".apps[$APP_INDEX].app.ports[$PORT_INDEX]")"
+				PORT_NAME="$(echo "$PORT_JSON" | jq -r ".name?")"
+				PORT="$(echo "$PORT_JSON" | jq -r ".port?")"
+				register "rkt-$POD_UUID" "$APP_NAME-$PORT_NAME" "$POD_IP" "$PORT"
+				PORT_INDEX=$(expr $PORT_INDEX + 1)
+			done
+		fi
+		APP_INDEX=$(expr $APP_INDEX + 1)
+	done
+}
+
+rktderegister() {
+	[ -f "$1" ] &&
+	POD_UUID="$(cat "$1")" &&
+	[ "$POD_UUID" ] &&
+	deregister "rkt-$POD_UUID"
+	STATUS=$?
+	rm -f "$1"
+	return $STATUS
+}
+
+rktpodip() {
+	rkt status "$1" | grep -Eo '^networks=[^:]+:[^=]+=[0-9a-z\.:]+' | grep -Eo '[0-9a-z\.:]+$' || (echo "Cannot find IP for $1" >&2; false)
+}
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+	help|--help)
+		usage
+	;;
+	list|show|register|deregister|rktregister|rktderegister|rktpodip)
+		$COMMAND "$@"
+	;;
+	*)
+		usage; exit 1
+	;;
+esac

@@ -1,0 +1,7 @@
+{
+	"services": {
+		"nginx": {
+			"image": "docker://nginx:1.10-alpine"
+		}
+	}
+}

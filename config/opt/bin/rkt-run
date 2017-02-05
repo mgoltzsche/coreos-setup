@@ -1,0 +1,30 @@
+#!/bin/sh
+
+[ $(id -u) -eq 0 ] || (echo 'Must be run as root!' >&2; false) || exit 1
+[ $# -gt 0 ] || (echo "Usage: $0 RKT_PREPARE_ARGS" >&2; false) || exit 1
+
+POD_NETWORK="${POD_NETWORK:-pod-net}"
+DNS_IP="${DNS_IP:-10.1.0.1}"
+DNS_SEARCH="${DNS_SEARCH:-service.dc1.consul}"
+
+terminateGracefully() {
+	trap : 1 3 9 15
+	consul-client deregister "$POD_UUID" || echo "ERROR: Failed to deregister pod $POD_UUID" >&2
+	kill -SIGTERM $POD_PID
+	for SEC in 1 3 7 10; do
+		ps $POD_PID >/dev/null || exit 0
+		sleep $SEC
+	done
+	kill -SIGKILL $POD_PID
+}
+
+POD_UUID="$(rkt prepare --quiet=true "$@")" &&
+rkt run-prepared --net="$POD_NETWORK" --dns="$DNS_IP" --dns-search="$DNS_SEARCH" "$POD_UUID" &
+POD_PID=$!
+echo "$POD_UUID"
+
+trap terminateGracefully 1 3 9 15
+
+#consul-client register hello "$POD_UUID" IP 8080
+
+wait

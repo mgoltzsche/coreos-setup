@@ -1,0 +1,18 @@
+[Unit]
+Description=Hello service
+Requires=consul.service
+After=consul.service
+
+[Service]
+Slice=machine.slice
+ExecStartPre=-/bin/sh -c '/usr/bin/rkt rm --uuid-file=/var/run/pod-%p.uuid; /usr/bin/rm -f /var/run/pod-%p.uuid'
+ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' --net=pod-net --dns=10.1.0.1 --dns-search=service.dc1.consul --insecure-options=image docker://alpine -- /usr/bin/nc -lk 0.0.0.0 8080 -e echo Hello world --- docker://busybox -- /bin/sleep 90
+ExecStartPost=/opt/bin/consul-client rktregister /var/run/pod-%p.uuid
+ExecStopPost=/opt/bin/consul-client rktderegister /var/run/pod-%p.uuid
+ExecStopPost=/usr/bin/rkt gc --mark-only
+KillMode=mixed
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+

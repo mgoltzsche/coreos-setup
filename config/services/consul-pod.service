@@ -1,0 +1,22 @@
+[Unit]
+Description=Consul pod
+Requires=consul.service
+After=consul.service
+
+[Service]
+Slice=machine.slice
+StandardOutput=journal
+ExecStartPre=-/bin/sh -c '/usr/bin/rkt rm --uuid-file=/var/run/pod-%p.uuid; /usr/bin/rm -f /var/run/pod-%p.uuid'
+# TODO: use consul aci/api key
+ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' --insecure-options=image \
+	--net=pod-net --dns=127.0.0.1 --dns-search=service.dc1.consul \
+	docker://owncloud --  --- \
+	docker://consul --exec=/bin/dumb-init --set-env=CONSUL_ALLOW_PRIVILEGED_PORTS= -- \
+		/bin/sh -c '/usr/local/bin/docker-entrypoint.sh agent -dns-port=53 -bind=0.0.0.0 -advertise=$(ip -o -4 addr list | grep -Eo 10\.1\.0\.[0-9]+/24 | cut -d / -f 1) -client=0.0.0.0 -retry-join=10.1.0.1'
+ExecStopPost=/usr/bin/rkt gc --mark-only
+KillMode=mixed
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+

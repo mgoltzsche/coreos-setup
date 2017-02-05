@@ -1,0 +1,9 @@
+#!/bin/sh
+
+[ $# -eq 2 ] || (echo "Usage: $0 ACIFILE DESTSERVER" >&2; false) || exit 1
+
+ACIFILE="$1"
+DESTSERVER="$2"
+ACIMAGE=
+
+curl -u max:publ!sh "$DESTSERVER/$ACIMAGE/startupload"

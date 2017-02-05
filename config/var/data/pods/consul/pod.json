@@ -1,0 +1,15 @@
+{
+	"services": {
+		"consul": {
+			"image": "docker://consul:0.7.3",
+			"exec": [
+				"/usr/local/bin/docker-entrypoint.sh", "agent",
+				"-server", "-ui", "-bootstrap-expect", "1", "-log-level", "info",
+				"-bind", "0.0.0.0", "-advertise", "10.1.0.1", "-client", "0.0.0.0", "-recursor", "8.8.8.8" ],
+			"http": {
+				"port": 8500,
+				"protect": true
+			}
+		}
+	}
+}
