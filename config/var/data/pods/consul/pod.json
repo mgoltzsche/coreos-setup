@@ -1,15 +1,54 @@
 {
 	"services": {
 		"consul": {
-			"image": "docker://consul:0.7.3",
+			"image": "docker://consul:0.7.5",
 			"exec": [
 				"/usr/local/bin/docker-entrypoint.sh", "agent",
 				"-server", "-ui", "-bootstrap-expect", "1", "-log-level", "info",
-				"-bind", "0.0.0.0", "-advertise", "10.1.0.1", "-client", "0.0.0.0", "-recursor", "8.8.8.8" ],
+				"-bind", "0.0.0.0", "-advertise", "172.16.28.1", "-client", "0.0.0.0", "-recursor", "8.8.8.8" ],
 			"http": {
 				"port": 8500,
 				"protect": true
-			}
+			},
+			"ports": [
+				{
+					"name": "8600-tcp",
+					"ip": "172.16.28.1",
+					"port": 53
+				},{
+					"name": "8600-udp",
+					"ip": "172.16.28.1",
+					"port": 53
+				},{
+					"name": "8500-tcp",
+					"ip": "172.16.28.1",
+					"port": 8500
+				},{
+					"name": "8400-tcp",
+					"ip": "172.16.28.1",
+					"port": 8400
+				},{
+					"name": "8300-tcp",
+					"ip": "172.16.28.1",
+					"port": 8300
+				},{
+					"name": "8301-tcp",
+					"ip": "172.16.28.1",
+					"port": 8301
+				},{
+					"name": "8301-udp",
+					"ip": "172.16.28.1",
+					"port": 8301
+				},{
+					"name": "8302-tcp",
+					"ip": "172.16.28.1",
+					"port": 8302
+				},{
+					"name": "8302-udp",
+					"ip": "172.16.28.1",
+					"port": 8302
+				}
+			]
 		}
 	}
 }

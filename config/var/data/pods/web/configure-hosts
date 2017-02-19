@@ -1,0 +1,105 @@
+#!/bin/sh
+
+[ $# -eq 0 ] || [ $# -eq 3 -a "$1" = server ] || (echo "Usage: $0 [server LISTENIP LISTENPORT]" >&2; false) || exit 1
+
+DATACENTER="${DATACENTER:-dc1}"
+LISTENHOST="$2"
+LISTENPORT="$3"
+
+waitForConsulAgent() {
+	for SEC in 1 1 3 3 5 10; do
+		wget -qO - "http://127.0.0.1:8500/v1/kv/?dc=$DATACENTER&keys" >/dev/null 2>/dev/null && return 0
+		sleep $SEC
+	done
+	echo "Consul agent unavailable" >&2
+	exit 1
+}
+
+waitForNginx() {
+	for SEC in 1 1 3 5; do
+		#nc -zvw1 127.0.0.1 80 2>/dev/null >/dev/null && return 0
+		[ -f /var/run/nginx.pid ] && ps "$(cat /var/run/nginx.pid)" && return 0
+		sleep $SEC
+	done
+	echo "nginx unavailable" >&2
+	exit 1
+}
+
+configureNginxVirtualHosts() {
+	waitForConsulAgent &&
+	find /etc/nginx/conf.d/ -name 'host-*.conf' -type f -exec rm {} \; && # Delete existing host configuration
+	HTTP_KEYS="$(wget -qO - "http://127.0.0.1:8500/v1/kv/http/?dc=$DATACENTER&keys" 2>/dev/null || true)" &&
+	HTTP_HOSTS="$(echo "$HTTP_KEYS" | grep -Eo '"http/[a-z0-9_\-\.]+"' | sed -E -e 's/^"http\///' -e 's/"$//' | sort | uniq)" &&
+	[ "$HTTP_HOSTS" ] || return 0
+	echo "$HTTP_HOSTS" | while read HTTP_HOST; do
+		CONF_FILE="/etc/nginx/conf.d/host-$HTTP_HOST.conf"
+		SERVICE_ADDRESS="$(wget -qO - "http://127.0.0.1:8500/v1/kv/http/$HTTP_HOST?dc=$DATACENTER&raw")" \
+			|| (echo "Service address value for HTTP host '$HTTP_HOST' could not be resolved" >&2; false) || return 1
+		([ "$SERVICE_ADDRESS" ] || (echo "Empty service address for HTTP host '$HTTP_HOST'" >&2; false)) &&
+		cat > "$CONF_FILE" <<-EOF
+			server {
+			  listen 80;
+			  #listen 443 ssl;
+			  server_name $HTTP_HOST;
+			  access_log  stdout  main;
+			  error_log  stderr  info;
+			  root /usr/share/nginx/html;
+
+			  #ssl_certificate     /etc/ssl/certs/repository.algorythm.de.crt;
+			  #ssl_certificate_key /etc/ssl/private/repository.algorythm.de.key;
+
+			  include proxy_params.conf;
+
+			  location / {
+			    resolver 127.0.0.1;
+			    # Variable required to let nginx not resolve hostname at boot time
+			    set \$service http://$SERVICE_ADDRESS;
+			    proxy_pass \$service;
+			  }
+
+			  error_page   500 502 503 504  /50x.html;
+			  location = /50x.html {
+			    root   /usr/share/nginx/html;
+			  }
+			}
+		EOF
+		[ $? -eq 0 ] &&
+		NGINX_CONF_TEST="$(nginx -t 2>&1)" \
+			|| (echo "$NGINX_CONF_TEST" >&2; echo "Removing invalid configuration file $CONF_FILE" >&2; rm "$CONF_FILE"; false) || return 1
+		echo "Configured virtual host: $HTTP_HOST -> $SERVICE_ADDRESS" >&2
+	done
+	# Generate index.html
+	HOST_LIST_ENTRIES="$(echo "$HTTP_HOSTS" | sed -E 's/^.*$/<li><a href="https:\/\/\0">\0<\/a><\/li>/')"
+	cat > /usr/share/nginx/html/index.html <<-EOF
+		<!DOCTYPE html>
+		<html>
+		<head>
+		<title>Welcome to nginx!</title>
+		<style>
+			body {
+				width: 35em;
+				margin: 0 auto;
+				font-family: Tahoma, Verdana, Arial, sans-serif;
+			}
+		</style>
+		</head>
+		<body>
+			<h1>Welcome!</h1>
+			<p>Sorry, the site you are looking for does not exist.</p>
+			<h2>Available sites</h2>
+			<ul>
+				$HOST_LIST_ENTRIES
+			</ul>
+		</body>
+		</html>
+	EOF
+}
+
+if [ "$1" = server ]; then
+	configureNginxVirtualHosts &&
+	nc -lk -s "$LISTENHOST" -p "$LISTENPORT" -e "$0" &
+else
+	waitForNginx &&
+	configureNginxVirtualHosts &&
+	nginx -s reload
+fi

@@ -1,7 +1,5 @@
 [Unit]
 Description=all pods
-Requires=consul.service
-After=consul.service
 
 [Service]
 Type=oneshot

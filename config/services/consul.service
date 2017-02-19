@@ -5,10 +5,13 @@ After=network-online.target
 
 [Service]
 Slice=machine.slice
+TimeoutStartSec=300
 StandardOutput=journal
+SyslogIdentifier=pod-%i
 ExecStartPre=-/bin/sh -c '/usr/bin/rkt rm --uuid-file=/var/run/pod-%p.uuid; /usr/bin/rm -f /var/run/pod-%p.uuid'
 ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' --insecure-options=image docker://consul:0.7.3 \
 	--name=consul-master \
+	--hostname=consul \
 	--net=pod-net --dns=host \
 	--port=8600-tcp:10.1.0.1:53 --port=8600-udp:10.1.0.1:53 \
 	--port=8500-tcp:10.1.0.1:8500 \
@@ -21,7 +24,7 @@ ExecStart=/usr/bin/rkt run --uuid-file-save='/var/run/pod-%p.uuid' --insecure-op
 			-bind 0.0.0.0 -advertise 10.1.0.1 -client 0.0.0.0 -recursor 8.8.8.8
 ExecStartPost=/usr/bin/sh -c 'for SEC in 1 1 5; do if rkt status "$(cat "/var/run/pod-%p.uuid" 2>/dev/null)" | grep -Eq "^state=running"; then /opt/bin/consul-client rktpodip "$(cat "/var/run/pod-%p.uuid")" > /var/run/consul-ip; exit 0; fi; if rkt status "$(cat "/var/run/pod-%p.uuid" 2>/dev/null)" | grep -Eq "^state=exited"; then exit 1; fi; sleep $SEC; done; exit 2'
 ExecStopPost=/usr/bin/rkt gc --mark-only
-KillMode=mixed
+KillMode=process
 Restart=always
 
 [Install]

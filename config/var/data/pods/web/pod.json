@@ -1,7 +1,28 @@
 {
 	"services": {
 		"nginx": {
-			"image": "docker://nginx:1.10-alpine"
+			"image": "docker://nginx:1.11-alpine",
+			"exec": [ "/bin/sh", "-c", "/bin/configure-hosts server 127.0.0.1 9090 && nginx -g \"daemon off;\"" ],
+			"ports": [
+				{
+					"name": "80-tcp",
+					"port": 80
+				},{
+					"name": "443-tcp",
+					"port": 443
+				}
+			],
+			"volumes": {
+				"/etc/nginx/nginx.conf": "./nginx.conf",
+				"/etc/nginx/proxy_params.conf": "./proxy_params.conf",
+				"/etc/nginx/conf.d": "volume-etc-nginx-conf-d",
+				"/bin/configure-hosts": "./configure-hosts"
+			}
+		}
+	},
+	"volumes": {
+		"volume-etc-nginx-conf-d": {
+			"source": "./volumes/volume-etc-nginx-conf-d"
 		}
 	}
 }

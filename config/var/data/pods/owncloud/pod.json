@@ -1,13 +1,15 @@
 {
 	"environment": {
-		"NAME": "world"
+		"NAME": "world",
+		"MYVAR": "myval"
 	},
 	"services": {
 		"owncloud": {
 			"image": "docker://owncloud",
 			"environment": {
 				"VAL1": "1st",
-				"VAL2": "cccc"
+				"VAL2": "cccc",
+				"HTTP_HOST": "owncloud.algorythm.de"
 			},
 			"http": {
 				"port": 80,

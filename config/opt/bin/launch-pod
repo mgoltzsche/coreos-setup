@@ -1,210 +1,181 @@
 #!/bin/sh
 
 [ $(id -u) -eq 0 ] || (echo 'Must be run as root!' >&2; false) || exit 1
-[ $# -eq 1 -o $# -eq 2 ] || (echo "Usage: $0 PODNAME [HOSTNAME]" >&2; false) || exit 1
 
-ROOT_DIRECTORY="${LAUNCHER_DIRECTORY:-/var/data/pods}"
-POD_NAME="$1"
-POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
-POD_DIRECTORY="$ROOT_DIRECTORY/$POD_NAME"
-POD_FILE="$POD_DIRECTORY/pod.json"
-[ -f "$POD_FILE" ] || (echo "Pod file does not exist: $POD_FILE"; false) || exit 1
-ROOT_CFG_JSON="$(cat "$ROOT_DIRECTORY/pod-admin.json")" || exit 1
-POD_USER="$(stat -c '%U' "$POD_DIRECTORY")" || exit 1
-POD_GROUP="$(stat -c '%U' "$POD_DIRECTORY")" || exit 1
-POD_HOSTNAME="${2:-$1}"
-POD_NET="$(echo "$ROOT_CFG_JSON" | jq -r "if (.pods.${POD_NAME_JSON}.net) then .pods.${POD_NAME_JSON}.net else .net end")"
-POD_DNS_IP="$(echo "$ROOT_CFG_JSON" | jq -r "if (.pods.${POD_NAME_JSON}.dns) then .pods.${POD_NAME_JSON}.dns else .dns end")"
-POD_DNS_SEARCH="${POD_DNS_SEARCH:-service.dc1.consul}"
-CONSUL_IMAGE=docker://consul:0.7.3
-CONSUL_MASTER_IP="$(echo "$ROOT_CFG_JSON" | jq -r '.dns')"
+usage() {
+	cat >&2 <<-EOF
+		Usage: $0 OPTIONS PODFILE PODNAME
+		OPTIONS:
+		  -c ROOTCONFFILE   Set pod root configuration
+		  -h HOSTNAME       Set pod hostname
+		  -v                Verbose
+	EOF
+	exit 1
+}
+
+# Args: POD_JSON
+validatePodJSON() {
+	POD_JSON="$1"
+	assertJSON "$POD_JSON" 1 'keys[]?' 'environment|volumes|services' &&
+	assertJSON "$POD_JSON" 1 '.services[]? | keys? | .[]' 'image|environment|exec|volumes|http|checks' &&
+	assertJSON "$POD_JSON" 1 '.services | length' '[1-9][0-9]*' &&
+	assertJSON "$POD_JSON" 1 '.services | keys? | .[]' '[a-zA-Z0-9_-]+' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.environment,.environment | keys? | .[]' '[a-zA-Z0-9_]+' &&
+	assertJSON "$POD_JSON" 1 '.services[]?.image | type' 'string' &&
+	assertJSON "$POD_JSON" 1 '.services[]?.image' '.+/.+' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | keys? | .[]' 'port|protect|subdomain' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .port' '[0-9]+' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .protect | type' 'boolean|null' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .protect' 'true|false|null' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .subdomain | type' 'string|null' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .subdomain' '[a-zA-Z0-9_-]*' || return 1
+
+	# Restrict volumes to pod directory
+	jq -n "$POD_JSON | .volumes | keys? | .[]" | while read VOLUME_NAME_JSON; do
+		(! jq -nr "$VOLUME_NAME_JSON" | grep -Eq '[^a-z0-9\-]' || (echo "Invalid volume name: $VOLUME_NAME. Only lower case alphanumeric chars and '-' supported." >&2; false)) &&
+		VOLUME_JSON="$(jq -n "$POD_JSON | .volumes.$VOLUME_NAME_JSON")" &&
+		VOLUME_DIRECTORY="$(jq -nr "$VOLUME_JSON | .source")" &&
+		VOLUME_DIRECTORY="$(cd "$POD_DIRECTORY" && readlink -m "$VOLUME_DIRECTORY")" &&
+		BASEDIR_LENGTH="$(expr length "$POD_DIRECTORY/")" &&
+		([ "$(echo "$VOLUME_DIRECTORY" | grep -Eo "^.{$BASEDIR_LENGTH}")" = "$POD_DIRECTORY/" ] \
+			|| (echo "Volume outside base directory: $VOLUME_DIRECTORY" >&2; false)) || return 1
+	done
+	# TODO: Assert there is no duplicate port binding 1) within a pod and 2) within all pods in the root directory
+}
 
 # Args: POD_JSON MANDATORY SELECTOR VALUEVALIDATIONREGEX
 assertJSON() {
 	JSON_SELECTION="$(echo "$1" | jq -r "$3")" &&
 	([ $? -eq 0 ] || (echo "Invalid or missing path: $3" >&2; false)) || return 1
 	if [ "$JSON_SELECTION" ]; then
-		(echo "$JSON_SELECTION" | grep -Eqx "$4" || (echo "Invalid value at $3 ($4): $(echo "$JSON_SELECTION" | grep -Evx "$4")" >&2; false))
+		(echo "$JSON_SELECTION" | grep -Eqx "$4" || (echo "Invalid JSON value at $3 ($4): $(echo "$JSON_SELECTION" | grep -Evx "$4")" >&2; false))
 	elif [ "$2" -eq 1 ]; then
 		echo "Missing path: $3" >&2
 		return 1
 	fi
 }
 
-# Args: POD_JSON
-validatePodJSON() {
-	VALIDATION_ERRORS="$((
-		assertJSON "$1" 0 'keys[]' 'environment|services'
-		assertJSON "$1" 1 '.services | length' '[1-9][0-9]*'
-		assertJSON "$1" 1 '.services | keys? | .[]' '[a-zA-Z0-9_-]+'
-		assertJSON "$1" 1 '.services[]? | keys? | .[]' 'image|environment|exec|http|checks'
-		assertJSON "$1" 0 '.services[]?.environment,.environment | keys? | .[]' '[a-zA-Z0-9_]+'
-		assertJSON "$1" 1 '.services[]?.image | type' 'string' &&
-		assertJSON "$1" 1 '.services[]?.image' '.+/.+'
-		assertJSON "$1" 0 '.services[]?.http | keys? | .[]' 'port|protect|subdomain' &&
-		(
-			assertJSON "$1" 0 '.services[]?.http | select(. != null) | .port' '[0-9]+'
-			assertJSON "$1" 0 '.services[]?.http | select(. != null) | .protect | type' 'boolean|null' &&
-			assertJSON "$1" 0 '.services[]?.http | select(. != null) | .protect' 'true|false|null'
-			assertJSON "$1" 0 '.services[]?.http | select(. != null) | .subdomain | type' 'string|null' &&
-			assertJSON "$1" 0 '.services[]?.http | select(. != null) | .subdomain' '[a-zA-Z0-9_-]*'
-		)
-	)2>&1)"
-	if [ "$VALIDATION_ERRORS" ]; then
-		echo "Invalid JSON deployment descriptor:" >&2;
-		echo "$VALIDATION_ERRORS" | sed -E 's/^/  /g' >&2;
-		return 1
-	else
-		fetchImages "$POD_JSON" >/dev/null &&
-		json2rkt "$POD_JSON" >/dev/null || return 1
-	fi
+generateEffectiveJSON() {
+	FIRST_TRANSFORM_JQ="
+		{\"pod\": $1, \"default\": $2} |
+		.effective = ({\"net\": \"default\", \"dns\": \"host\"} + {\"net\": .default.net, \"dns\": .default.dns, \"dns-search\": .default.\"dns-search\"} + .pod) |
+		.effective.services = (.default.services + .pod.services)
+	"
+	EFFECTIVE_JSON="$(jq -n "$FIRST_TRANSFORM_JQ")" &&
+	FETCHED_IMAGE_MANIFESTS="$(fetchImageMetadata "$EFFECTIVE_JSON")" || return 1
+	# TODO: Generate normalized volume ids for ./ volumes
+	SECOND_TRANSFORM_JQ="
+		.images = $FETCHED_IMAGE_MANIFESTS | 
+		.effective.volumes = (reduce .images[]?.app?.mountPoints[]? as \$item ({}; . + {(\$item.name): {\"source\": (\"./volumes/\" + \$item.name)}}) + .default.volumes + .pod.volumes) |
+		.effective.volumes += reduce (.effective.services[].volumes? | to_entries? | .[] | select(.value | startswith(\"./\") or startswith(\"/\"))) as \$item ({}; . + {(\$item.value): {\"source\": \$item.value, \"readonly\": true}})
+	"
+	echo "$EFFECTIVE_JSON" | jq "$SECOND_TRANSFORM_JQ"
 }
 
-# Args: POD_JSON
-fetchImages() {
-	FETCH_OPTIONS=
-	if echo "$1" | jq -r '.services[].image' | grep -Eq '^docker://'; then
-		FETCH_OPTIONS='--insecure-options=image' # Required to fetch docker images
-	fi
-	IMAGE_IDS="$((echo "$CONSUL_IMAGE"; echo "$1" | jq -r '.services[].image') | xargs rkt fetch $FETCH_OPTIONS)" &&
-	echo "$IMAGE_IDS" | sort | uniq
+fetchImageMetadata() {
+	POD_IMAGE_MANIFESTS="$(echo "$1" | jq '.effective.services[]?.image' | while read IMAGE_NAME_JSON; do
+		IMAGE_NAME="$(jq -nr "$IMAGE_NAME_JSON")"
+		IMAGE_FETCH_OPTIONS=
+		! echo "$IMAGE_NAME" | grep -Eq '^docker://' || IMAGE_FETCH_OPTIONS='--insecure-options=image'
+		FETCHED_IMAGE_ID="$(rkt fetch $IMAGE_FETCH_OPTIONS "$IMAGE_NAME")" || (echo "Cannot fetch image: $IMAGE_NAME" >&2; false) || exit 1
+		FETCHED_IMAGE_MANIFEST="$(rkt image cat-manifest "$FETCHED_IMAGE_ID")" &&
+		jq -n "{$IMAGE_NAME_JSON: $FETCHED_IMAGE_MANIFEST}"
+	done)" &&
+	echo "$POD_IMAGE_MANIFESTS" | jq -s 'reduce .[] as $item ({}; . + $item)'
 }
 
-# Args: VOLUME_NAME
-createVolumeDirectory() {
-	(echo "$1" | grep -Eiq '[a-z0-9_-]+' || (echo "Illegal volume name: $1" >&2; false)) &&
-	VOLUME_DIRECTORY="$POD_DIRECTORY/volumes/$1" &&
-	echo "$VOLUME_DIRECTORY" | su "$POD_USER" -c "xargs mkdir -m 770 -p" &&
-	echo "$VOLUME_DIRECTORY"
-}
-
-# Args: POD_JSON
 json2rkt() {
-	POD_JSON="$1"
-	# insecure-options=image
-	if echo "$POD_JSON" | jq -r '.services[].image' | grep -Eq '^docker://'; then
+	# If contains docker image add: --insecure-options=image
+	if jq -nr "$POD_JSON | .services[]?.image | startswith(\"docker://\")" >/dev/null; then
 		printf '%s\0' --insecure-options=image # Required to fetch docker images
 	fi
-	# pod environment
-	for ENVVAR in $(echo "$POD_JSON" | jq -r ".environment | keys? | .[]"); do
-		printf '%s=%s=%s\0' --set-env "$ENVVAR" "$(echo "$POD_JSON" | jq -r ".environment.\"$ENVVAR\"")" || return 1
-	done
-	# pod volumes for image manifest mount points
-	IMAGES="$(fetchImages "$POD_JSON")" &&
-	CONSUL_CONFIG_DIRECTORY="$(createVolumeDirectory volume-consul-config)" &&
-	printf '%s=%s\0' --volume "volume-consul-config,kind=host,source=$CONSUL_CONFIG_DIRECTORY"
-	MOUNTPOINTS="$(echo "$IMAGES" | xargs -n1 rkt image cat-manifest | jq -r '.app.mountPoints[]?.name' | sort | uniq)" || return 1
-	for VOLUME_NAME in $MOUNTPOINTS; do
-		VOLUME_DIRECTORY="$(createVolumeDirectory "$VOLUME_NAME")" &&
+	# add pod environment
+	generateEnvVarArgs "$POD_JSON" --set-env &&
+	# add pod volumes for image manifest mount points
+	jq -n "$POD_JSON | .volumes | keys? | .[]" | while read VOLUME_NAME_JSON; do
+		VOLUME_NAME="$(jq -nr "$VOLUME_NAME_JSON")" &&
+		VOLUME_NAME="$(volumeName "$VOLUME_NAME")" &&
+		VOLUME_JSON="$(jq -n "$POD_JSON | .volumes.$VOLUME_NAME_JSON")" &&
+		VOLUME_KIND="$(jq -nr "$VOLUME_JSON | if (.kind) then .kind else \"host\" end")" &&
+		VOLUME_READONLY="$(jq -n "$VOLUME_JSON | if (.readonly) then true else false end")" &&
+		VOLUME_SOURCE="$(jq -nr "$VOLUME_JSON | .source")" &&
+		VOLUME_SOURCE="$(cd "$POD_DIRECTORY" && readlink -m "$VOLUME_SOURCE")" &&
+		([ -f "$VOLUME_SOURCE" ] || echo "$VOLUME_SOURCE" | su "$POD_USER" -c "xargs mkdir -m 770 -p" || (echo "Cannot create volume directory: $VOLUME_SOURCE" >&2; false)) &&
+		printf '%s=%s\0' --volume "$VOLUME_NAME,kind=$VOLUME_KIND,source=$VOLUME_SOURCE,readOnly=$VOLUME_READONLY" || return 1
 		# TODO: Make volume available for user that owns the pod.json
-		printf '%s=%s\0' --volume "$VOLUME_NAME,kind=host,source=$VOLUME_DIRECTORY" || return 1
 	done
-	# pod ports
-	generateRktPortArgs "$POD_NAME" "$POD_JSON" "$ROOT_CFG_JSON"
-	# services
-	echo "$POD_JSON" | jq -r '.services | keys[]' | while read SERVICE_NAME; do
-		SERVICE_NAME_JSON="$(echo "$SERVICE_NAME" | jq -R .)"
-		SERVICE_JSON="$(echo "$POD_JSON" | jq -r ".services.$SERVICE_NAME_JSON")" &&
-		IMAGE="$(echo "$SERVICE_JSON" | jq -r ".image")" &&
-		IMAGE_ID="$(rkt fetch "$IMAGE")" &&
-		generateConsulServiceConfig "$SERVICE_NAME" "$IMAGE_ID" > "$CONSUL_CONFIG_DIRECTORY/app-${SERVICE_NAME}.json" || return 1
-		printf '%s\0' "$IMAGE"
-		# service environment (TODO: do not expose variable values in process list)
-		for ENVVAR in $(echo "$SERVICE_JSON" | jq -r ".environment | keys? | .[]"); do
-			VARVAL="$(echo "$SERVICE_JSON" | jq -r ".environment.\"$ENVVAR\"")" &&
-			printf '%s=%s=%s\0' --environment "$ENVVAR" "$VARVAL" || return 1
-		done
-		# service exec
-		if [ "$(echo "$SERVICE_JSON" | jq -r ".exec | length")" -gt 0 ]; then
-			printf '%s=%s\0' --exec "$(echo "$SERVICE_JSON" | jq -r ".exec[0]")"
-			printf '%s\0' -- # Argument separator
-			echo "$SERVICE_JSON" | jq -r ".exec[1:][]" | xargs -n1 printf '%s\0'
-		else
-			printf '%s\0' -- # Argument separator
-		fi
-		printf '%s\0' --- # Container separator
-	done
-	printf '%s\0--environment=CONSUL_ALLOW_PRIVILEGED_PORTS=\0' "$CONSUL_IMAGE"
-	printf '%s\0' '--mount=volume=volume-consul-config,target=/consul/config'
-	printf '%s\0--\0' '--exec=/bin/dumb-init'
-	printf "/bin/sh\0-c\0/usr/local/bin/docker-entrypoint.sh agent -dns-port=53 -bind=0.0.0.0 -client=0.0.0.0 -retry-join=$POD_DNS_IP -advertise=\$(ip -o -4 addr list | grep -Ev '[0-9]+:\s+lo\s' | head -1 | grep -Eo '[0-9\.]+/[0-9]+' | cut -d / -f 1)"
-}
-
-# Args: PODNAME PODJSON SETTINGSJSON
-generateRktPortArgs() {
-	POD_NAME="$1"
-	POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
-	POD_JSON="$2"
-	SETTINGS_JSON="$3"
-	POD_PORTS_JSON="$(fetchImages "$POD_JSON" | xargs -n1 rkt image cat-manifest | jq -c '.app.ports[]?' | jq -s .)"
-	echo "$SETTINGS_JSON" | jq -c ".pods.${POD_NAME_JSON}.ports[]?" | while read PORT_JSON; do
-		PNAME="$(echo "$PORT_JSON" | jq -r '.name')"
+	# add pod ports
+	AVAILABLE_POD_PORTS_JSON="$(jq -n "$EFFECTIVE_JSON | [.images[].app?.ports[]?]")" &&
+	jq -nc "$POD_JSON | .services[]?.ports[]?" | while read PORT_JSON; do
+		PNAME="$(jq -nr "$PORT_JSON | .name")"
 		PNAME_JSON="$(echo "$PNAME" | jq -R .)"
-		PIP="$(echo "$PORT_JSON" | jq -r 'if (.ip) then .ip else "" end')"
-		PORT="$(echo "$PORT_JSON" | jq -r '.port')"
+		PIP="$(jq -nr "$PORT_JSON | if (.ip) then .ip else \"\" end")"
+		PORT="$(jq -nr "$PORT_JSON | .port")"
 		if [ "$PIP" ]; then
 			IPPORT="$PIP:$PORT"
 		else
 			IPPORT="$PORT"
 		fi
-		if echo "$POD_PORTS_JSON" | jq -e "map(select(.name == $PNAME_JSON)) | length == 1" >/dev/null; then
+		if jq -ne "$AVAILABLE_POD_PORTS_JSON | map(select(.name == $PNAME_JSON)) | length > 0" >/dev/null; then
 			printf '%s\0' "--port=$PNAME:$IPPORT"
 		else
 			echo "WARNING: Pod '$POD_NAME' does not expose port '$PNAME' although it is forwarded." >&2
 		fi
 	done
-}
-
-# Args: SERVICE_NAME IMAGE_ID
-generateConsulServiceConfig() {
-	IMAGE_MANIFEST="$(rkt image cat-manifest "$2")"
-	PORT_COUNT=$(echo "$IMAGE_MANIFEST" | jq -r '.app.ports | length')
-	[ $PORT_COUNT -gt 0 ] || return 0
-	PRIMARY_PORT="$(echo "$IMAGE_MANIFEST" | jq -r '.app.ports[0].port')"
-	PROTOCOL="$(echo "$IMAGE_MANIFEST" | jq -r '.app.ports[0].protocol')"
-	PORT_CHECK_ARGS=
-	[ ! "$PROTOCOL" = udp ] || PORT_CHECK_ARGS=u
-	HEALTH_CHECKS="[{\"script\": \"/usr/bin/nc -zvw1$PORT_CHECK_ARGS 127.0.0.1 $2\", \"interval\": \"10s\"}]"
-	SERVICES_JSON=
-	#SERVICES_JSON="$(generateConsulServiceJSON "$1" "$PRIMARY_PORT" "$PROTOCOL" '["primary"]')"
-	PORT_INDEX=0
-	while [ $PORT_INDEX -lt $PORT_COUNT ]; do
-		PORT_JSON="$(echo "$IMAGE_MANIFEST" | jq -r ".app.ports[$PORT_INDEX]")"
-		PNAME="$(echo "$PORT_JSON" | jq -r '.name')"
-		PORT="$(echo "$PORT_JSON" | jq -r '.port')"
-		PROTOCOL="$(echo "$PORT_JSON" | jq -r '.protocol')"
-		SERVICES_JSON="${SERVICES_JSON}$(generateConsulServiceJSON "$1" "$PORT" "$PROTOCOL" "[\"$PORT-$PROTOCOL\"]")"
-		PORT_INDEX=$(expr $PORT_INDEX + 1)
+	# add services/containers
+	jq -n "$POD_JSON | .services | keys? | .[]" | while read SERVICE_NAME_JSON; do
+		SERVICE_NAME="$(jq -nr "$SERVICE_NAME_JSON")" &&
+		SERVICE_JSON="$(jq -ne "$POD_JSON | .services.$SERVICE_NAME_JSON")" &&
+		IMAGE="$(jq -nr "$SERVICE_JSON | .image")" &&
+		printf '%s\0' "$IMAGE"
+		printf '%s\0' "--name=$SERVICE_NAME"
+		# service environment (TODO: do not expose variable values in process list)
+		generateEnvVarArgs "$SERVICE_JSON" --environment &&
+		# service volume mounts
+		jq -n "$SERVICE_JSON | .volumes | keys? | .[]" | while read VOLUME_TARGET_JSON; do
+			VOLUME_TARGET="$(jq -nr "$VOLUME_TARGET_JSON")" &&
+			VOLUME_NAME="$(jq -nr "$SERVICE_JSON | .volumes.$VOLUME_TARGET_JSON")" &&
+			VOLUME_NAME="$(volumeName "$VOLUME_NAME")" &&
+			printf '%s\0' "--mount=volume=$VOLUME_NAME,target=$VOLUME_TARGET" || return 1
+		done
+		# service exec
+		if [ "$(jq -nr "$SERVICE_JSON | .exec | length")" -gt 0 ]; then
+			printf '%s=%s\0' --exec "$(jq -nr "$SERVICE_JSON | .exec[0]")"
+			printf '%s\0' -- # Argument separator
+			jq -nr "$SERVICE_JSON | .exec[1:][]" | while read ARG; do
+				printf '%s\0' "$ARG"
+			done
+		else
+			printf '%s\0' -- # Argument separator
+		fi
+		printf '%s\0' --- # Container separator
 	done
-	SERVICES_JSON="$(echo "$SERVICES_JSON" | sed -E '/^,$/d')"
-	echo "{\"services\": [$SERVICES_JSON]}"
 }
 
-# Args: NAME PORT PROTOCOL TAGS
-generateConsulServiceJSON() {
-	PORT_CHECK_ARGS=
-	[ ! "$3" = udp ] || PORT_CHECK_ARGS=u
-	HEALTH_CHECKS="[{\"script\": \"/usr/bin/nc -zvw1$PORT_CHECK_ARGS 127.0.0.1 $2\", \"interval\": \"10s\"}]"
-	cat <<-EOF
-		{
-			"name": "$1",
-			"tags": ${4:-[]},
-			"address": "",
-			"port": $2,
-			"enableTagOverride": false,
-			"checks": $HEALTH_CHECKS
-		}
-		,
-	EOF
+# Arg: VOLREFNAME
+volumeName() {
+	echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E -e 's/[^a-z0-9]/-/g' -e 's/(^-+)|(-+$)//g'
 }
 
-waitForConsul() {
-	for SEC in 1 1 3 5 10; do
-		! echo | ncat -vuw1 "$POD_DNS_IP" 53 2>&1 | grep -q "Connected to $POD_DNS_IP" || return 0
-		sleep $SEC
+# Args: JSON ENVVARRKTARGNAME
+generateEnvVarArgs() {
+	jq -n "$1 | .environment | keys? | .[]" | while read ENVVAR_NAME_JSON; do
+		ENVVAR="$(jq -nr "$ENVVAR_NAME_JSON")" &&
+		VARVAL="$(jq -nr "$1 | .environment.$ENVVAR_NAME_JSON")" &&
+		printf '%s=%s=%s\0' "$2" "$ENVVAR" "$VARVAL" || return 1
 	done
-	echo "Consul master unavailable" >&2
-	return 1
+}
+
+runExecBefore() {
+	export POD_NAME
+	export EFFECTIVE_JSON
+	export POD_NET
+	export POD_DNS
+	(POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
+	cd "$POD_DIRECTORY" &&
+	# TODO: remove or make safe: exec-before in pod
+	EXEC_BEFORE="$(echo "$DEFAULTS_JSON" | jq -r "if (.pods.$POD_NAME_JSON | has(\"exec-before\")) then .pods.$POD_NAME_JSON.\"exec-before\"[]? else if (.\"exec-before\") then .\"exec-before\"[]? else \"/bin/true\" end end" | xargs)"
+	sh -c "$EXEC_BEFORE" || (echo "Error in exec-before script: $EXEC_BEFORE" >&2; false) || return 1)
 }
 
 terminateGracefully() {
@@ -219,16 +190,71 @@ terminateGracefully() {
 }
 
 
-json2rkt "$(cat "$POD_FILE")" | xargs -0n1
 
-POD_UUID_FILE="/var/run/pod-${POD_NAME}.uuid"
-POD_JSON="$(cat "$POD_FILE")" &&
+DEFAULTS_FILE=
+POD_FILE=
+POD_NAME=
+POD_HOSTNAME=
+VERBOSE=
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-c)
+			shift
+			DEFAULTS_FILE="$1"
+			[ "$1" ] || usage
+		;;
+		-h)
+			shift
+			POD_HOSTNAME="$1"
+			[ "$1" ] || usage
+		;;
+		-v)
+			VERBOSE=true
+		;;
+		*)
+			break;
+		;;
+	esac
+	shift
+done
+POD_FILE="$1"
+POD_NAME="$2"
+shift
+shift
+[ ! -z "$POD_FILE" -a ! -z "$POD_NAME" -a $# -eq 0 ] || usage
+
+DEFAULTS_JSON="$(cat "$DEFAULTS_FILE" 2>/dev/null || echo '{}')" || exit 1
+POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
+POD_HOSTNAME="${HOSTNAME:-$POD_NAME}"
+POD_DIRECTORY="$(readlink -m "$(dirname "$POD_FILE")")"
+POD_UUID_FILE="/var/run/pod-${POD_NAME}.uuid" # todo
+POD_JSON="$(cat "$POD_FILE")" || exit 1
+POD_USER="$(stat -c '%U' "$POD_FILE")" || exit 1
+POD_GROUP="$(stat -c '%U' "$POD_FILE")" || exit 1
+
 validatePodJSON "$POD_JSON" &&
-waitForConsul &&
+EFFECTIVE_JSON="$(generateEffectiveJSON "$POD_JSON" "$DEFAULTS_JSON")" &&
+POD_JSON="$(jq -n "$EFFECTIVE_JSON | .effective")" &&
+POD_NET="$(jq -nr "$POD_JSON | .net")" &&
+POD_DNS="$(jq -nr "$POD_JSON | .dns")" &&
+POD_DNS_SEARCH="$(jq -n "$POD_JSON | .\"dns-search\" | select(. != null)")" || exit 1
+DNS_SEARCH_OPT=
+[ ! "$POD_DNS_SEARCH" ] || DNS_SEARCH_OPT="--dns-search=$POD_DNS_SEARCH"
+
+runExecBefore "$POD_NAME" || exit 1
+
+if [ "$VERBOSE" ]; then
+	echo 'Effective configuration:'
+	jq -n "$EFFECTIVE_JSON | .effective"
+	printf 'Will now run rkt commands:\n%s\n' '  rkt prepare --quiet=true'
+	json2rkt "$POD_JSON" | xargs -0n1 | sed -E 's/^/    /g'
+	echo "  rkt run-prepared --hostname=$POD_HOSTNAME --net=$POD_NET --dns=$POD_DNS $DNS_SEARCH_OPT CONTAINER_UUID"
+fi
+
 POD_UUID="$(json2rkt "$POD_JSON" | xargs -0 rkt prepare --quiet=true)" &&
-([ ! -f "$POD_UUID_FILE" ] || /usr/bin/rkt rm --uuid-file="$POD_UUID_FILE" >/dev/null 2>/dev/null || true) &&
+([ ! -f "$POD_UUID_FILE" ] || /usr/bin/rkt rm --uuid-file="$POD_UUID_FILE" >/dev/null 2>/dev/null || true) && # Clean up old container
 echo "$POD_UUID" > "$POD_UUID_FILE" || exit 1
-rkt run-prepared --hostname="$POD_HOSTNAME" --net="$POD_NET" --dns="127.0.0.1" --dns-search="$POD_DNS_SEARCH" "$POD_UUID" &
+rkt run-prepared --hostname="$POD_HOSTNAME" --net="$POD_NET" --dns="$POD_DNS" $DNS_SEARCH_OPT "$POD_UUID" &
 POD_PID=$!
 trap terminateGracefully 2 3 9 15
 wait

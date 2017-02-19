@@ -1,0 +1,83 @@
+#!/bin/sh
+
+[ $# -eq 3 ] || (echo "Usage: $0 MASTERHOST DATACENTER CLIENTDESTFILE" >&2; false) || exit 1
+[ "$POD_NAME" ] || (echo "Missing env var: POD_NAME" >&2; false) || exit 1
+[ "$EFFECTIVE_JSON" ] || (echo "Missing env var: POD_JSON" >&2; false) || exit 1
+
+waitForConsulMaster() {
+	for SEC in 1 1 3 3 5 10; do
+		curl -XGET "http://$CONSUL_MASTER_HOST:8500/v1/kv/?dc=$CONSUL_DATACENTER&keys" >/dev/null 2>/dev/null && return 0
+		sleep $SEC
+	done
+	echo "Consul master ($CONSUL_MASTER_HOST) unavailable" >&2
+	return 1
+}
+
+consulConfigJq() {
+	POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
+	CONSUL_DATACENTER_JSON="$(echo "$CONSUL_DATACENTER" | jq -R .)"
+	cat <<-EOF
+		$EFFECTIVE_JSON | {
+			"datacenter": $CONSUL_DATACENTER_JSON,
+			"log_level": "INFO",
+			"node_name": $POD_NAME_JSON,
+			"server": false,
+			"services": [.images as \$i | .pod.services | to_entries[] as \$e | \$i[\$e.value.image]?.app?.ports[]? | {
+					"name": (\$e.key),
+					"tags": [.name],
+					"address": "",
+					"port": .port,
+					"enableTagOverride": false,
+					"checks": [{
+						"script": ("/usr/bin/nc -zvw1" + (if (.protocol == "udp") then "u" else "" end) + " 127.0.0.1 " + (.port|tostring)),
+						"interval": "10s"
+					}]
+				}
+			]
+		}
+	EOF
+}
+
+registerHttpHostConsulKvEntries() {
+	# TODO: use consul txn for batch insert
+	SERVICE_HOST="${POD_NAME}.node.${CONSUL_DATACENTER}.consul" &&
+	SERVICE_HOST_LENGTH="$(expr length "${SERVICE_HOST}:")" &&
+	HTTP_HOST_JQ="$(httpHostEntriesJq)" &&
+	HTTP_HOSTS_JSON="$(jq -nc "$HTTP_HOST_JQ")" || return 1
+	[ "$HTTP_HOSTS_JSON" ] && echo "$HTTP_HOSTS_JSON" | while read HTTP_HOST_JSON; do
+		HTTP_HOST="$(jq -nr "$HTTP_HOST_JSON | .httpHost")" &&
+		SERVICE_PORT="$(jq -nr "$HTTP_HOST_JSON | .port | select(. != null)")" &&
+		SERVICE_ADDRESS="$SERVICE_HOST:$SERVICE_PORT" &&
+		([ "$SERVICE_PORT" ] || (echo "Service HTTP_PORT undefined for HTTP_HOST: $HTTP_HOST" >&2; false)) &&
+		REGISTERED_SERVICE_ADDRESS="$(curl -XGET "http://$CONSUL_MASTER_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER&raw" -m 10 2>/dev/null || true)" &&
+		# Disallow HTTP host override
+		([ ! "$REGISTERED_SERVICE_ADDRESS" ] || [ "$(echo "$REGISTERED_SERVICE_ADDRESS" | grep -Eo "^.{$SERVICE_HOST_LENGTH}")" = "${SERVICE_HOST}:" ] \
+			|| (echo "HTTP_HOST $HTTP_HOST is already registered for $REGISTERED_SERVICE_ADDRESS!" >&2; false)) || return 1
+		# Register pod as HTTP host
+		if [ ! "$REGISTERED_SERVICE_ADDRESS" = "${SERVICE_ADDRESS}" ]; then
+			echo "Registering proxy host $HTTP_HOST -> $SERVICE_ADDRESS"
+			[ "$(curl -XPUT "http://$CONSUL_MASTER_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER" -m 10 -d "$SERVICE_ADDRESS" 2>/dev/null)" = true ] \
+				|| (echo "Failed to register HTTP_HOST in consul: $HTTP_HOST=$SERVICE_ADDRESS" >&2; false) || return 1
+		fi
+	done
+	true
+}
+
+httpHostEntriesJq() {
+	cat <<-EOF
+		$EFFECTIVE_JSON | .images as \$i | .effective?.services? | to_entries? | .[] as \$s | \$s.value.environment? | select(.HTTP_HOST != null) | {
+			"httpHost": .HTTP_HOST,
+			"port": (if (.HTTP_PORT) then .HTTP_PORT else (\$i[\$s.value.image]?.app?.ports as \$p | if ((\$p | length) == 1) then \$p[0].port else null end) end)
+		}
+	EOF
+}
+
+CONSUL_MASTER_HOST="$1"
+CONSUL_DATACENTER="$2"
+DEST_FILE="$3"
+POD_DOMAIN="$(printf "$DOMAIN_SCHEMA" "$POD_NAME")"
+rm -f "$DEST_FILE" &&
+waitForConsulMaster &&
+mkdir -p "$(dirname "$DEST_FILE")" &&
+jq -n "$(consulConfigJq)" > "$DEST_FILE" &&
+registerHttpHostConsulKvEntries

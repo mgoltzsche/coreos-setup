@@ -1,0 +1,9 @@
+{
+	"watches": [
+		{
+			"type": "keyprefix",
+			"prefix": "http/",
+			"handler": "nc -zw3 127.0.0.1 9090"
+		}
+	]
+}

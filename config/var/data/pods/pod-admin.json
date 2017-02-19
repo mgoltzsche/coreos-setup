@@ -1,70 +1,34 @@
 {
 	"directory": "/var/data/pods",
 	"main": "web",
-	"net": "pod-net",
-	"dns": "10.1.0.1",
+	"net": "default",
+	"dns": "127.0.0.1",
+	"dns-search": "service.dc1.consul",
+	"exec-before" : ["/opt/bin/configure-consul-pod", "172.16.28.1", "dc1", "./volumes/volume-consul-config/client.json"],
 	"pods": {
-		"web": {
-			"ports": [
-				{
-					"name": "80-tcp",
-					"port": 80
-				},{
-					"name": "443-tcp",
-					"port": 443
-				}
-			]
-		},
 		"consul": {
 			"dns": "host",
-			"ports": [
-				{
-					"name": "8600-tcp",
-					"ip": "10.1.0.1",
-					"port": 53
-				},{
-					"name": "8600-udp",
-					"ip": "10.1.0.1",
-					"port": 53
-				},{
-					"name": "8500-tcp",
-					"ip": "10.1.0.1",
-					"port": 8500
-				},{
-					"name": "8400-tcp",
-					"ip": "10.1.0.1",
-					"port": 8400
-				},{
-					"name": "8300-tcp",
-					"ip": "10.1.0.1",
-					"port": 8300
-				},{
-					"name": "8301-tcp",
-					"ip": "10.1.0.1",
-					"port": 8301
-				},{
-					"name": "8301-udp",
-					"ip": "10.1.0.1",
-					"port": 8301
-				},{
-					"name": "8302-tcp",
-					"ip": "10.1.0.1",
-					"port": 8302
-				},{
-					"name": "8302-udp",
-					"ip": "10.1.0.1",
-					"port": 8302
-				}
-			]
+			"dns-search": null,
+			"exec-before": null
 		}
 	},
-	"sidekick-services": {
+	"services": {
 		"consul": {
-			"image": "docker://consul:0.7.3",
+			"image": "docker://consul:0.7.5",
 			"exec": [
-				"/bin/dumb-init", "/bin/sh", "-c",
-				"/usr/local/bin/docker-entrypoint.sh agent -dns-port=53 -bind=0.0.0.0 -client=0.0.0.0 -retry-join=10.1.0.1 -advertise=$(ip -o -4 addr list | grep -Ev '[0-9]+:\\s+lo\\s' | head -1 | grep -Eo '[0-9\\.]+/[0-9]+' | cut -d / -f 1)"
-			]
+				"/usr/local/bin/docker-entrypoint.sh", "agent", "-dns-port=53", "-retry-join=172.16.28.1", "-bind=0.0.0.0", "-client=0.0.0.0", "-recursor=8.8.8.8"
+			],
+			"environment": {
+				"CONSUL_ALLOW_PRIVILEGED_PORTS": ""
+			},
+			"volumes": {
+				"/consul/config": "volume-consul-config"
+			}
+		}
+	},
+	"volumes": {
+		"volume-consul-config": {
+			"source": "./volumes/volume-consul-config"
 		}
 	}
 }
