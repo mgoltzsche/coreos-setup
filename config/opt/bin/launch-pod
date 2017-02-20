@@ -243,18 +243,25 @@ DNS_SEARCH_OPT=
 
 runExecBefore "$POD_NAME" || exit 1
 
+# Add host entries
+HOSTS_ENTRY_ARGS=
+HOSTS_ENTRY_ARGS="$(jq -nr "$POD_JSON | .services | keys? | .[]" | while read SERVICE_NAME; do
+	HOSTS_ENTRY_ARGS="$HOSTS_ENTRY_ARGS --hosts-entry=127.0.0.1=$SERVICE_NAME" || exit 1
+	echo "$HOSTS_ENTRY_ARGS"
+done | tail -1)" || exit 1
+
 if [ "$VERBOSE" ]; then
 	echo 'Effective configuration:'
 	jq -n "$EFFECTIVE_JSON | .effective"
 	printf 'Will now run rkt commands:\n%s\n' '  rkt prepare --quiet=true'
 	json2rkt "$POD_JSON" | xargs -0n1 | sed -E 's/^/    /g'
-	echo "  rkt run-prepared --hostname=$POD_HOSTNAME --net=$POD_NET --dns=$POD_DNS $DNS_SEARCH_OPT CONTAINER_UUID"
+	echo "  rkt run-prepared --hostname=$POD_HOSTNAME --net=$POD_NET --dns=$POD_DNS $DNS_SEARCH_OPT $HOSTS_ENTRY_ARGS CONTAINER_UUID"
 fi
 
 POD_UUID="$(json2rkt "$POD_JSON" | xargs -0 rkt prepare --quiet=true)" &&
 ([ ! -f "$POD_UUID_FILE" ] || /usr/bin/rkt rm --uuid-file="$POD_UUID_FILE" >/dev/null 2>/dev/null || true) && # Clean up old container
 echo "$POD_UUID" > "$POD_UUID_FILE" || exit 1
-rkt run-prepared --hostname="$POD_HOSTNAME" --net="$POD_NET" --dns="$POD_DNS" $DNS_SEARCH_OPT "$POD_UUID" &
+rkt run-prepared --hostname="$POD_HOSTNAME" --net="$POD_NET" --dns="$POD_DNS" $DNS_SEARCH_OPT $HOSTS_ENTRY_ARGS "$POD_UUID" &
 POD_PID=$!
 trap terminateGracefully 2 3 9 15
 wait
