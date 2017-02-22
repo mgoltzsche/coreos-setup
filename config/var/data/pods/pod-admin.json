@@ -1,34 +1,14 @@
 {
-	"directory": "/var/data/pods",
-	"main": "web",
 	"net": "default",
-	"dns": "127.0.0.1",
-	"dns-search": "service.dc1.consul",
-	"exec-before" : ["/opt/bin/configure-consul-pod", "172.16.28.1", "dc1", "./volumes/volume-consul-config/client.json"],
+	"dns": ["172.16.28.1"],
+	"dns-search": ["service.dc1.consul"],
+	"inject-hosts": true,
+	"on-prepared": ["/opt/bin/wait-for-consul", "172.16.28.1", "dc1"],
+	"on-started": ["/opt/bin/configure-consul", "172.16.28.1", "dc1", "../consul/volumes/volume-consul-config"],
 	"pods": {
 		"consul": {
-			"dns": "host",
-			"dns-search": null,
-			"exec-before": null
-		}
-	},
-	"services": {
-		"consul": {
-			"image": "docker://consul:0.7.5",
-			"exec": [
-				"/usr/local/bin/docker-entrypoint.sh", "agent", "-dns-port=53", "-retry-join=172.16.28.1", "-bind=0.0.0.0", "-client=0.0.0.0", "-recursor=8.8.8.8"
-			],
-			"environment": {
-				"CONSUL_ALLOW_PRIVILEGED_PORTS": ""
-			},
-			"volumes": {
-				"/consul/config": "volume-consul-config"
-			}
-		}
-	},
-	"volumes": {
-		"volume-consul-config": {
-			"source": "./volumes/volume-consul-config"
+			"on-prepared": null,
+			"on-started": null,
 		}
 	}
 }

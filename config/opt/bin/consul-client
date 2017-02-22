@@ -68,6 +68,7 @@ deregister() {
 	EOF
 }
 
+# Args: CONTAINER_UUID
 rktwait() {
 	for SEC in 1 1 3 5; do
 		cat "$1"

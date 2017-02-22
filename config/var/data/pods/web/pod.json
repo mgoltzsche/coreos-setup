@@ -2,7 +2,7 @@
 	"services": {
 		"nginx": {
 			"image": "docker://nginx:1.11-alpine",
-			"exec": [ "/bin/sh", "-c", "/bin/configure-hosts server 127.0.0.1 9090 && nginx -g \"daemon off;\"" ],
+			"exec": [ "/bin/sh", "-c", "/bin/configure-hosts server 0.0.0.0 9090 && nginx -g \"daemon off;\"" ],
 			"ports": [
 				{
 					"name": "80-tcp",

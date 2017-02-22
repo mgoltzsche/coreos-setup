@@ -1,0 +1,9 @@
+{
+	"watches": [
+		{
+			"type": "event",
+			"name": "reload-config",
+			"handler": "/bin/sh -c 'if [ ! -f /tmp/reload ]; then touch /tmp/reload; consul reload; STATUS=$?; sleep 1; rm -f /tmp/reload; exit $STATUS; fi'"
+		}
+	]
+}

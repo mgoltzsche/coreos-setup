@@ -1,35 +1,41 @@
 #!/bin/sh
 
-[ $# -eq 3 ] || (echo "Usage: $0 MASTERHOST DATACENTER CLIENTDESTFILE" >&2; false) || exit 1
+[ $# -eq 3 ] && [ "$1" ] && [ "$2" ] && [ "$3" ] || (echo "Usage: $0 CONSULHOST DATACENTER CONFDIR" >&2; false) || exit 1
 [ "$POD_NAME" ] || (echo "Missing env var: POD_NAME" >&2; false) || exit 1
-[ "$EFFECTIVE_JSON" ] || (echo "Missing env var: POD_JSON" >&2; false) || exit 1
+[ "$EFFECTIVE_JSON" ] || (echo "Missing env var: EFFECTIVE_JSON" >&2; false) || exit 1
+[ "$POD_IP" ] || (echo "Missing env var: POD_IP" >&2; false) || exit 1
+
+CONSUL_HOST="$1"
+CONSUL_DATACENTER="$2"
+DEST_FILE="$3/pod-${POD_NAME}.json"
 
 waitForConsulMaster() {
 	for SEC in 1 1 3 3 5 10; do
-		curl -XGET "http://$CONSUL_MASTER_HOST:8500/v1/kv/?dc=$CONSUL_DATACENTER&keys" >/dev/null 2>/dev/null && return 0
+		curl -XGET "http://$CONSUL_HOST:8500/v1/kv/?dc=$CONSUL_DATACENTER&keys" >/dev/null 2>/dev/null && return 0
 		sleep $SEC
 	done
-	echo "Consul master ($CONSUL_MASTER_HOST) unavailable" >&2
+	echo "Consul master ($CONSUL_HOST) unavailable" >&2
 	return 1
 }
 
+# TODO: Write config into consul master so that no consul client required (Problem: service address must be known)
 consulConfigJq() {
 	POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
 	CONSUL_DATACENTER_JSON="$(echo "$CONSUL_DATACENTER" | jq -R .)"
+	#"datacenter": $CONSUL_DATACENTER_JSON,
+	#"log_level": "INFO",
+	#"node_name": $POD_NAME_JSON,
+	#"server": false,
 	cat <<-EOF
 		$EFFECTIVE_JSON | {
-			"datacenter": $CONSUL_DATACENTER_JSON,
-			"log_level": "INFO",
-			"node_name": $POD_NAME_JSON,
-			"server": false,
 			"services": [.images as \$i | .pod.services | to_entries[] as \$e | \$i[\$e.value.image]?.app?.ports[]? | {
 					"name": (\$e.key),
 					"tags": [.name],
-					"address": "",
+					"address": "$POD_IP",
 					"port": .port,
 					"enableTagOverride": false,
 					"checks": [{
-						"script": ("/usr/bin/nc -zvw1" + (if (.protocol == "udp") then "u" else "" end) + " 127.0.0.1 " + (.port|tostring)),
+						"script": ("/usr/bin/nc -zvw1" + (if (.protocol == "udp") then "u" else "" end) + " $POD_IP " + (.port|tostring)),
 						"interval": "10s"
 					}]
 				}
@@ -49,14 +55,14 @@ registerHttpHostConsulKvEntries() {
 		SERVICE_PORT="$(jq -nr "$HTTP_HOST_JSON | .port | select(. != null)")" &&
 		SERVICE_ADDRESS="$SERVICE_HOST:$SERVICE_PORT" &&
 		([ "$SERVICE_PORT" ] || (echo "Service HTTP_PORT undefined for HTTP_HOST: $HTTP_HOST" >&2; false)) &&
-		REGISTERED_SERVICE_ADDRESS="$(curl -XGET "http://$CONSUL_MASTER_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER&raw" -m 10 2>/dev/null || true)" &&
+		REGISTERED_SERVICE_ADDRESS="$(curl -XGET "http://$CONSUL_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER&raw" -m 3 2>/dev/null || true)" &&
 		# Disallow HTTP host override
 		([ ! "$REGISTERED_SERVICE_ADDRESS" ] || [ "$(echo "$REGISTERED_SERVICE_ADDRESS" | grep -Eo "^.{$SERVICE_HOST_LENGTH}")" = "${SERVICE_HOST}:" ] \
 			|| (echo "HTTP_HOST $HTTP_HOST is already registered for $REGISTERED_SERVICE_ADDRESS!" >&2; false)) || return 1
 		# Register pod as HTTP host
 		if [ ! "$REGISTERED_SERVICE_ADDRESS" = "${SERVICE_ADDRESS}" ]; then
 			echo "Registering proxy host $HTTP_HOST -> $SERVICE_ADDRESS"
-			[ "$(curl -XPUT "http://$CONSUL_MASTER_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER" -m 10 -d "$SERVICE_ADDRESS" 2>/dev/null)" = true ] \
+			[ "$(curl -XPUT "http://$CONSUL_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER" -m 3 -d "$SERVICE_ADDRESS" 2>/dev/null)" = true ] \
 				|| (echo "Failed to register HTTP_HOST in consul: $HTTP_HOST=$SERVICE_ADDRESS" >&2; false) || return 1
 		fi
 	done
@@ -72,12 +78,15 @@ httpHostEntriesJq() {
 	EOF
 }
 
-CONSUL_MASTER_HOST="$1"
-CONSUL_DATACENTER="$2"
-DEST_FILE="$3"
-POD_DOMAIN="$(printf "$DOMAIN_SCHEMA" "$POD_NAME")"
+fireConsulReloadConfigEvent() {
+	curl -XPUT "http://$CONSUL_HOST:8500/v1/event/fire/reload-config?dc=$CONSUL_DATACENTER" -m 3 -d '' >/dev/null 2>/dev/null \
+		|| (echo "Failed to fire consul reload-config event!" >&2; false)
+}
+
 rm -f "$DEST_FILE" &&
-waitForConsulMaster &&
 mkdir -p "$(dirname "$DEST_FILE")" &&
 jq -n "$(consulConfigJq)" > "$DEST_FILE" &&
+fireConsulReloadConfigEvent &&
 registerHttpHostConsulKvEntries
+
+# TODO: dig @172.16.28.1 consul.service.dc1.consul | grep -E '^[^;]+' | head -1 | grep -Eo '[0-9a-z\.:]+$'

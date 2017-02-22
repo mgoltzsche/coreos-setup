@@ -1,0 +1,13 @@
+#!/bin/sh
+
+[ $# -eq 2 ] && [ "$1" ] && [ "$2" ] || (echo "Usage: $0 CONSULHOST DATACENTER" >&2; false) || exit 1
+
+CONSUL_HOST="$1"
+CONSUL_DATACENTER="$2"
+
+for SEC in 1 1 1 1 1 1 1 1 1 1; do
+	curl -XGET "http://$CONSUL_HOST:8500/v1/kv/?dc=$CONSUL_DATACENTER&keys" >/dev/null 2>/dev/null && exit 0
+	sleep 1
+done
+echo "consul ($CONSUL_HOST) unavailable" >&2
+exit 1
