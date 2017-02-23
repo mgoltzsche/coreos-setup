@@ -173,7 +173,7 @@ generateRunArgs() {
 	# TODO: make calls safe against shell injections
 	GENARGS="$(jq -nr "$POD_JSON | $2" | while read ARGVAL; do
 		GENARGS="$GENARGS $1=$3$ARGVAL" || exit 1
-		echo "$GENARGS"
+		printf "$GENARGS\n" "$POD_NAME"
 	done)" || return 1
 	echo "$GENARGS" | tail -1
 }

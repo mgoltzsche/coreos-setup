@@ -3,7 +3,7 @@
 		{
 			"type": "keyprefix",
 			"prefix": "http/",
-			"handler": "(curl -XGET http://127.0.0.1:8500/v1/catalog/service/nginx -m 3 2>/dev/null | grep -Eo '\"ServiceAddress\":\"[^\"]+\"' | cut -d '\"' -f 4; echo 9090) | xargs nc -zw3"
+			"handler": "(curl -XGET http://127.0.0.1:8500/v1/catalog/service/web -m 3 2>/dev/null | grep -Eo '\"ServiceAddress\":\"[^\"]+\"' | cut -d '\"' -f 4; echo 9090) | xargs nc -zw3"
 		}
 	]
 }

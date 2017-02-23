@@ -1,8 +1,8 @@
 {
 	"net": "default",
 	"dns": ["172.16.28.1"],
-	"dns-search": ["service.dc1.consul"],
-	"inject-hosts": true,
+	"dns-search": ["%s.service.dc1.consul", "service.dc1.consul"],
+	"inject-hosts": false,
 	"on-prepared": ["/opt/bin/wait-for-consul", "172.16.28.1", "dc1"],
 	"on-started": ["/opt/bin/configure-consul", "172.16.28.1", "dc1", "../consul/volumes/volume-consul-config"],
 	"pods": {

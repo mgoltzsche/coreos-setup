@@ -26,18 +26,19 @@ consulConfigJq() {
 	#"log_level": "INFO",
 	#"node_name": $POD_NAME_JSON,
 	#"server": false,
+	#.images as \$i | .pod.services | to_entries[] as \$e | \$i[\$e.value.image]?.app?.ports[]? | {
+	#
+	#					"checks": [{
+	#						"script": ("/usr/bin/nc -zvw1" + (if (.protocol == "udp") then "u" else "" end) + " $POD_IP " + (.port|tostring)),
+	#						"interval": "10s"
+	#					}]
 	cat <<-EOF
 		$EFFECTIVE_JSON | {
-			"services": [.images as \$i | .pod.services | to_entries[] as \$e | \$i[\$e.value.image]?.app?.ports[]? | {
-					"name": (\$e.key),
-					"tags": [.name],
+			"services": [{
+					"name": $POD_NAME_JSON,
+					"tags": [.pod.services | to_entries[]?.key],
 					"address": "$POD_IP",
-					"port": .port,
-					"enableTagOverride": false,
-					"checks": [{
-						"script": ("/usr/bin/nc -zvw1" + (if (.protocol == "udp") then "u" else "" end) + " $POD_IP " + (.port|tostring)),
-						"interval": "10s"
-					}]
+					"enableTagOverride": false
 				}
 			]
 		}
@@ -46,14 +47,13 @@ consulConfigJq() {
 
 registerHttpHostConsulKvEntries() {
 	# TODO: use consul txn for batch insert
-	SERVICE_HOST="${POD_NAME}.node.${CONSUL_DATACENTER}.consul" &&
 	SERVICE_HOST_LENGTH="$(expr length "${SERVICE_HOST}:")" &&
 	HTTP_HOST_JQ="$(httpHostEntriesJq)" &&
 	HTTP_HOSTS_JSON="$(jq -nc "$HTTP_HOST_JQ")" || return 1
 	[ "$HTTP_HOSTS_JSON" ] && echo "$HTTP_HOSTS_JSON" | while read HTTP_HOST_JSON; do
 		HTTP_HOST="$(jq -nr "$HTTP_HOST_JSON | .httpHost")" &&
 		SERVICE_PORT="$(jq -nr "$HTTP_HOST_JSON | .port | select(. != null)")" &&
-		SERVICE_ADDRESS="$SERVICE_HOST:$SERVICE_PORT" &&
+		SERVICE_ADDRESS="$POD_NAME:$SERVICE_PORT" &&
 		([ "$SERVICE_PORT" ] || (echo "Service HTTP_PORT undefined for HTTP_HOST: $HTTP_HOST" >&2; false)) &&
 		REGISTERED_SERVICE_ADDRESS="$(curl -XGET "http://$CONSUL_HOST:8500/v1/kv/http/$HTTP_HOST?dc=$CONSUL_DATACENTER&raw" -m 3 2>/dev/null || true)" &&
 		# Disallow HTTP host override
