@@ -9,13 +9,12 @@
 
 [ $# -eq 0 ] || [ $# -eq 3 -a "$1" = server ] || (echo "Usage: $0 [server LISTENIP LISTENPORT]" >&2; false) || exit 1
 
-DATACENTER="${DATACENTER:-dc1}"
 LISTENHOST="$2"
 LISTENPORT="$3"
 
 waitForConsulAgent() {
 	for SEC in 1 1 3 3 5 10; do
-		wget -qO - "http://consul:8500/v1/kv/?dc=$DATACENTER&keys" >/dev/null 2>/dev/null && return 0
+		wget -qO - "http://consul:8500/v1/kv/?keys" >/dev/null 2>/dev/null && return 0
 		sleep $SEC
 	done
 	echo "Consul unavailable" >&2
@@ -24,8 +23,7 @@ waitForConsulAgent() {
 
 waitForNginx() {
 	for SEC in 1 1 3 5; do
-		#nc -zvw1 127.0.0.1 80 2>/dev/null >/dev/null && return 0
-		[ -f /var/run/nginx.pid ] && ps "$(cat /var/run/nginx.pid)" && return 0
+		[ -f /var/run/nginx.pid ] && ps -o pid | grep -wq "$(cat /var/run/nginx.pid)" && return 0
 		sleep $SEC
 	done
 	echo "nginx unavailable" >&2
@@ -35,14 +33,16 @@ waitForNginx() {
 configureNginxVirtualHosts() {
 	waitForConsulAgent &&
 	find /etc/nginx/conf.d/ -name 'host-*.conf' -type f -exec rm {} \; && # Delete existing host configuration
-	HTTP_KEYS="$(wget -qO - "http://127.0.0.1:8500/v1/kv/http/?dc=$DATACENTER&keys" 2>/dev/null || true)" &&
+	HTTP_KEYS="$(wget -qO - "http://consul:8500/v1/kv/http/?keys" 2>/dev/null || true)" &&
 	HTTP_HOSTS="$(echo "$HTTP_KEYS" | grep -Eo '"http/[a-z0-9_\-\.]+"' | sed -E -e 's/^"http\///' -e 's/"$//' | sort | uniq)" &&
-	[ "$HTTP_HOSTS" ] || return 0
-	echo "$HTTP_HOSTS" | while read HTTP_HOST; do
+	CONSUL_IP="$(wget -qO - http://consul:8500/v1/catalog/service/consul 2>/dev/null | grep -Eo '"Address":"[^"]+"' | cut -d '"' -f 4)" || return 1
+	[ -z "$HTTP_HOSTS" ] || echo "$HTTP_HOSTS" | while read HTTP_HOST; do
 		CONF_FILE="/etc/nginx/conf.d/host-$HTTP_HOST.conf"
-		SERVICE_ADDRESS="$(wget -qO - "http://127.0.0.1:8500/v1/kv/http/$HTTP_HOST?dc=$DATACENTER&raw")" \
+		SERVICE_ADDRESS="$(wget -qO - "http://consul:8500/v1/kv/http/$HTTP_HOST?raw")" \
 			|| (echo "Service address value for HTTP host '$HTTP_HOST' could not be resolved" >&2; false) || return 1
 		([ "$SERVICE_ADDRESS" ] || (echo "Empty service address for HTTP host '$HTTP_HOST'" >&2; false)) &&
+		SERVICE_ADDRESS="$(echo "$SERVICE_ADDRESS" | sed -E 's/([^:]+)(:[0-9]+)/\1.service.dc1.consul\2/')"
+		# TODO: move service.dc1.consul into parameter
 		cat > "$CONF_FILE" <<-EOF
 			server {
 			  listen 80;
@@ -58,7 +58,7 @@ configureNginxVirtualHosts() {
 			  include proxy_params.conf;
 
 			  location / {
-			    resolver 127.0.0.1;
+			    resolver $CONSUL_IP;
 			    # Variable required to let nginx not resolve hostname at boot time
 			    set \$service http://$SERVICE_ADDRESS;
 			    proxy_pass \$service;

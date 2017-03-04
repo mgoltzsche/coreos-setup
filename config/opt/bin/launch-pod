@@ -56,139 +56,87 @@ assertJSON() {
 }
 
 generateEffectiveJSON() {
-	FIRST_TRANSFORM_JQ="
-		{\"pod\": $1, \"default\": $2} |
-		.effective += {\"net\": \"default\", \"dns\": [\"host\"], \"inject-hosts\": true} |
-		.effective += (.default | with_entries(select(.key == [\"net\", \"dns\", \"dns-search\", \"inject-hosts\"][]))) |
-		.effective += .pod |
-		.effective.services = (.default.services + .pod.services)
-	"
-	EFFECTIVE_JSON="$(jq -n "$FIRST_TRANSFORM_JQ")" &&
-	FETCHED_IMAGE_MANIFESTS="$(fetchImageMetadata "$EFFECTIVE_JSON")" || return 1
-	# TODO: Generate normalized volume ids for ./ volumes
-	SECOND_TRANSFORM_JQ="
-		.images = $FETCHED_IMAGE_MANIFESTS | 
-		.effective.volumes = (reduce .images[]?.app?.mountPoints[]? as \$item ({}; . + {(\$item.name): {\"source\": (\"./volumes/\" + \$item.name)}}) + .default.volumes + .pod.volumes) |
-		.effective.volumes += reduce (.effective.services[].volumes? | to_entries? | .[] | select(.value | startswith(\"./\") or startswith(\"/\"))) as \$item ({}; . + {(\$item.value): {\"source\": \$item.value, \"readonly\": true}})
-	"
-	echo "$EFFECTIVE_JSON" | jq "$SECOND_TRANSFORM_JQ"
-}
-
-fetchImageMetadata() {
-	POD_IMAGE_MANIFESTS="$(echo "$1" | jq '.effective.services[]?.image' | while read IMAGE_NAME_JSON; do
-		IMAGE_NAME="$(jq -nr "$IMAGE_NAME_JSON")"
+	# TODO: make cat-manifest call safe
+	FETCHED_IMAGE_MANIFESTS='{}'
+	for IMAGE_REF in $(jq -nr "$1 | .services[]?.image"); do
 		IMAGE_FETCH_OPTIONS=
-		! echo "$IMAGE_NAME" | grep -Eq '^docker://' || IMAGE_FETCH_OPTIONS='--insecure-options=image'
-		FETCHED_IMAGE_ID="$(rkt fetch $IMAGE_FETCH_OPTIONS "$IMAGE_NAME")" || (echo "Cannot fetch image: $IMAGE_NAME" >&2; false) || exit 1
+		! echo "$IMAGE_REF" | grep -Eq '^docker://' || IMAGE_FETCH_OPTIONS='--insecure-options=image'
+		FETCHED_IMAGE_ID="$(rkt fetch $IMAGE_FETCH_OPTIONS "$IMAGE_REF")" || (echo "Cannot fetch image: $IMAGE_REF" >&2; false) || return 1
 		FETCHED_IMAGE_MANIFEST="$(rkt image cat-manifest "$FETCHED_IMAGE_ID")" &&
-		jq -n "{$IMAGE_NAME_JSON: $FETCHED_IMAGE_MANIFEST}"
-	done)" &&
-	echo "$POD_IMAGE_MANIFESTS" | jq -s 'reduce .[] as $item ({}; . + $item)'
+		FETCHED_IMAGE_MANIFESTS="$(jq -n "$FETCHED_IMAGE_MANIFESTS + {\"$IMAGE_REF\": $FETCHED_IMAGE_MANIFEST}")" || return 1
+	done
+	jq --arg pod_name "$POD_NAME" --arg pod_dir "$POD_DIRECTORY" '
+		def isfilevol(v): v | startswith("../") or startswith("./") or startswith("/");
+		def tovolname(p): "volume-" + (p |
+			ascii_downcase? | explode? |
+			map(if ((. > 47 and . < 58) or (. > 96 and . < 123)) then . else 45 end) |
+			reduce .[] as $char (
+				{"result":[],"last":0};
+				if ($char == 45 and .last == 45)
+				then .
+				else {"result": (.result + [$char]), "last": $char}
+				end
+			) | .result | implode | ltrimstr("-") | rtrimstr("-")
+		);
+		.effective += {"net": "default", "dns": ["host"], "inject-hosts": true} |
+		.effective += (.default | with_entries(select(.key == ["net", "dns", "dns-search", "inject-hosts"][]))) |
+		.effective += .pod |
+		.effective.volumes = (reduce .images[]?.app?.mountPoints[]? as $item ({}; . + {($item.name): {"source": ("./volumes/" + $item.name), "kind": "host", "readonly": false}})) |
+		.effective.volumes += .default.volumes |
+		.effective.volumes += (reduce (.effective.services[]?.volumes? | to_entries? | .[]? | select(isfilevol(.value))) as $e ({}; . + {(tovolname($e.key)): {"source": $e.value, "kind": "host", "readonly": true}})) |
+		.effective.volumes += .pod.volumes |
+		.effective.volumes[]?.source |= (if (startswith("/")) then . else ($pod_dir + "/" + .) end) |
+		.effective.volumes[]?.kind |= (if (. == null) then "host" else . end) |
+		.effective.volumes[]?.readonly |= (if (. == null) then false else . end) |
+		(.effective.services[]?.volumes? | select(. != null)) |= with_entries(.value = if (isfilevol(.value)) then tovolname(.key) else .value end)
+	' <<-EOF
+		{"pod": $1, "default": $2, "images": $FETCHED_IMAGE_MANIFESTS}
+	EOF
+	[ $? -eq 0 ] || (echo 'Effective JSON transformation failed!' >&2; false)
+	#.effective."on-prepared" = (if (.default.pods[$pod_name]?."on-prepared" != null) then .default.pods[$pod_name]?."on-prepared" else (if (.default."on-prepared" != null) then .default."on-prepared" else "/bin/true" end) end) |
+	#.effective."on-started" = (if (.default.pods[$pod_name]?."on-started" != null) then .default.pods[$pod_name]?."on-started" else (if (.default."on-started" != null) then .default."on-started" else "/bin/true" end) end) |
 }
 
-json2rkt() {
-	# If contains docker image add: --insecure-options=image
-	if jq -nr "$POD_JSON | .services[]?.image | startswith(\"docker://\")" >/dev/null; then
-		printf '%s\0' --insecure-options=image # Required to fetch docker images
-	fi
-	# add pod environment
-	generateEnvVarArgs "$POD_JSON" --set-env &&
-	# add pod volumes for image manifest mount points
-	jq -n "$POD_JSON | .volumes | keys? | .[]" | while read VOLUME_NAME_JSON; do
-		VOLUME_NAME="$(jq -nr "$VOLUME_NAME_JSON")" &&
-		VOLUME_NAME="$(volumeName "$VOLUME_NAME")" &&
-		VOLUME_JSON="$(jq -n "$POD_JSON | .volumes.$VOLUME_NAME_JSON")" &&
-		VOLUME_KIND="$(jq -nr "$VOLUME_JSON | if (.kind) then .kind else \"host\" end")" &&
-		VOLUME_READONLY="$(jq -n "$VOLUME_JSON | if (.readonly) then true else false end")" &&
-		VOLUME_SOURCE="$(jq -nr "$VOLUME_JSON | .source")" &&
-		VOLUME_SOURCE="$(cd "$POD_DIRECTORY" && readlink -m "$VOLUME_SOURCE")" &&
-		([ -f "$VOLUME_SOURCE" ] || echo "$VOLUME_SOURCE" | su "$POD_USER" -c "xargs mkdir -m 770 -p" || (echo "Cannot create volume directory: $VOLUME_SOURCE" >&2; false)) &&
-		printf '%s=%s\0' --volume "$VOLUME_NAME,kind=$VOLUME_KIND,source=$VOLUME_SOURCE,readOnly=$VOLUME_READONLY" || return 1
-		# TODO: Make volume available for user that owns the pod.json
-	done
-	# add pod ports
-	AVAILABLE_POD_PORTS_JSON="$(jq -n "$EFFECTIVE_JSON | [.images[].app?.ports[]?]")" &&
-	jq -nc "$POD_JSON | .services[]?.ports[]?" | while read PORT_JSON; do
-		PNAME="$(jq -nr "$PORT_JSON | .name")"
-		PNAME_JSON="$(echo "$PNAME" | jq -R .)"
-		PIP="$(jq -nr "$PORT_JSON | if (.ip) then .ip else \"\" end")"
-		PORT="$(jq -nr "$PORT_JSON | .port")"
-		if [ "$PIP" ]; then
-			IPPORT="$PIP:$PORT"
-		else
-			IPPORT="$PORT"
-		fi
-		if jq -ne "$AVAILABLE_POD_PORTS_JSON | map(select(.name == $PNAME_JSON)) | length > 0" >/dev/null; then
-			printf '%s\0' "--port=$PNAME:$IPPORT"
-		else
-			echo "WARNING: Pod '$POD_NAME' does not expose port '$PNAME' although it is forwarded." >&2
-		fi
-	done
-	# add services/containers
-	jq -n "$POD_JSON | .services | keys? | .[]" | while read SERVICE_NAME_JSON; do
-		SERVICE_NAME="$(jq -nr "$SERVICE_NAME_JSON")" &&
-		SERVICE_JSON="$(jq -ne "$POD_JSON | .services.$SERVICE_NAME_JSON")" &&
-		IMAGE="$(jq -nr "$SERVICE_JSON | .image")" &&
-		printf '%s\0' "$IMAGE"
-		printf '%s\0' "--name=$SERVICE_NAME"
-		# service environment (TODO: do not expose variable values in process list)
-		generateEnvVarArgs "$SERVICE_JSON" --environment &&
-		# service volume mounts
-		jq -n "$SERVICE_JSON | .volumes | keys? | .[]" | while read VOLUME_TARGET_JSON; do
-			VOLUME_TARGET="$(jq -nr "$VOLUME_TARGET_JSON")" &&
-			VOLUME_NAME="$(jq -nr "$SERVICE_JSON | .volumes.$VOLUME_TARGET_JSON")" &&
-			VOLUME_NAME="$(volumeName "$VOLUME_NAME")" &&
-			printf '%s\0' "--mount=volume=$VOLUME_NAME,target=$VOLUME_TARGET" || return 1
-		done
-		# service exec
-		if [ "$(jq -nr "$SERVICE_JSON | .exec | length")" -gt 0 ]; then
-			printf '%s=%s\0' --exec "$(jq -nr "$SERVICE_JSON | .exec[0]")"
-			printf '%s\0' -- # Argument separator
-			jq -nr "$SERVICE_JSON | .exec[1:][]" | while read ARG; do
-				printf '%s\0' "$ARG"
-			done
-		else
-			printf '%s\0' -- # Argument separator
-		fi
-		printf '%s\0' --- # Container separator
-	done
+# TODO: restrict by ports defined for pod in defaults if defaults defined
+generateRktPrepareArgs() {
+	echo "$EFFECTIVE_JSON" | jq -r '
+		[.images[].app?.ports[]?] as $availPorts |
+		[
+			([if (.effective.services[]?.image | startswith("docker://")) then "--insecure-options=image" else empty end][0] | select(. != null)),
+			(.effective.volumes? | to_entries? | .[]? | ("--volume=" + .key + ",source=" + .value.source + ",kind=" + .value.kind + ",readOnly=" + (.value.readonly == true | tostring))),
+			(.effective.environment? | to_entries? | .[]? | ("--set-env=" + .key + "=" + .value)),
+			(.effective.services[]?.ports[]? | ("--port=" + .name + (if (.ip) then (":" + .ip) else "" end) + ":" + (.port | tostring))),
+			(.effective.services? | to_entries? | .[]? | (
+				(.value.image),
+				("--name=" + .key),
+				(.value.environment? | to_entries? | .[]? | ("--environment=" + .key + "=" + .value)),
+				(.value.volumes? | to_entries? | .[]? | ("--mount=volume=" + .value + ",target=" + .key)),
+				(if ((.value.exec | length) > 0) then (("--exec=" + .value.exec[0]), "--", (.value.exec[1:][])) else "--" end),
+				"---"
+			))
+		] | join("\u0000")' | head -z -n -1
 }
 
-# Arg: VOLREFNAME
-volumeName() {
-	echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E -e 's/[^a-z0-9]/-/g' -e 's/(^-+)|(-+$)//g'
-}
-
-# Args: JSON ENVVARRKTARGNAME
-generateEnvVarArgs() {
-	jq -n "$1 | .environment | keys? | .[]" | while read ENVVAR_NAME_JSON; do
-		ENVVAR="$(jq -nr "$ENVVAR_NAME_JSON")" &&
-		VARVAL="$(jq -nr "$1 | .environment.$ENVVAR_NAME_JSON")" &&
-		printf '%s=%s=%s\0' "$2" "$ENVVAR" "$VARVAL" || return 1
-	done
-}
-
-# Args: JQ_QUERY
-generateRunArgs() {
-	# TODO: make calls safe against shell injections
-	GENARGS="$(jq -nr "$POD_JSON | $2" | while read ARGVAL; do
-		GENARGS="$GENARGS $1=$3$ARGVAL" || exit 1
-		printf "$GENARGS\n" "$POD_NAME"
-	done)" || return 1
-	echo "$GENARGS" | tail -1
+# TODO: secure volume base dir
+generateRktRunArgs() {
+	echo "$POD_JSON" | jq -r --arg pod_name "$POD_NAME" '(
+		("--hostname=" + (if (.hostname == null) then $pod_name else .hostname end)),
+		("--net=" + .net),
+		(.dns[]? | ("--dns=" + .)),
+		(."dns-search"[]? | ("--dns-search=" + (. | split("${pod_name}") | join($pod_name)))),
+		(if (."inject-hosts" == true) then (.services | keys? | .[]? | ("--hosts-entry=127.0.0.1=" + .)) else empty end)
+	)' | xargs
 }
 
 runInfrastructureScript() {
 	SCRIPT_TYPE="$1"
 	export POD_NAME
 	export EFFECTIVE_JSON
-	export POD_NET
-	export POD_DNS
 	export POD_IP
 	(POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
 	cd "$POD_DIRECTORY" &&
 	# TODO: remove or make call whitespace safe
-	EXEC_SCRIPT="$(jq -nre "$DEFAULTS_JSON | if (.pods.$POD_NAME_JSON | has(\"$SCRIPT_TYPE\")) then .pods.$POD_NAME_JSON.\"$SCRIPT_TYPE\"[]? else if (.\"$SCRIPT_TYPE\") then .\"$SCRIPT_TYPE\"[]? else \"/bin/true\" end end" | xargs)" &&
+	EXEC_SCRIPT="$(jq -nre "$DEFAULTS_JSON | if (.pods."$POD_NAME" | has(\"$SCRIPT_TYPE\")) then .pods.$POD_NAME_JSON.\"$SCRIPT_TYPE\"[]? else if (.\"$SCRIPT_TYPE\") then .\"$SCRIPT_TYPE\"[]? else \"/bin/true\" end end" | xargs)" &&
 	(sh -c "$EXEC_SCRIPT" || (echo "Error in $SCRIPT_TYPE script: $EXEC_SCRIPT" >&2; false))) || return 1
 }
 
@@ -233,18 +181,12 @@ terminateGracefully() {
 DEFAULTS_FILE=
 POD_FILE=
 POD_NAME=
-POD_HOSTNAME=
 VERBOSE=
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-c)
 			shift
 			DEFAULTS_FILE="$1"
-			[ "$1" ] || usage
-		;;
-		-h)
-			shift
-			POD_HOSTNAME="$1"
 			[ "$1" ] || usage
 		;;
 		-v)
@@ -262,45 +204,34 @@ shift
 shift
 [ ! -z "$POD_FILE" -a ! -z "$POD_NAME" -a $# -eq 0 ] || usage
 
-DEFAULTS_JSON="$(cat "$DEFAULTS_FILE" 2>/dev/null || echo '{}')" || exit 1
-POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
-POD_HOSTNAME="${HOSTNAME:-$POD_NAME}"
-POD_DIRECTORY="$(readlink -m "$(dirname "$POD_FILE")")"
-POD_UUID_FILE="/var/run/pod-${POD_NAME}.uuid" # todo
-POD_JSON="$(cat "$POD_FILE")" || exit 1
-POD_USER="$(stat -c '%U' "$POD_FILE")" || exit 1
-POD_GROUP="$(stat -c '%U' "$POD_FILE")" || exit 1
-
+DEFAULTS_JSON="$([ ! -f "$DEFAULTS_FILE" ] || cat "$DEFAULTS_FILE")" &&
+DEFAULTS_JSON="${DEFAULTS_JSON:-\{\}}" &&
+POD_DIRECTORY="$(readlink -m "$(dirname "$POD_FILE")")" &&
+POD_UUID_FILE="/var/run/pod-${POD_NAME}.uuid" && # todo
+POD_JSON="$(cat "$POD_FILE")" &&
+POD_USER="$(stat -c '%U' "$POD_FILE")" &&
+POD_GROUP="$(stat -c '%U' "$POD_FILE")" &&
 validatePodJSON "$POD_JSON" &&
 EFFECTIVE_JSON="$(generateEffectiveJSON "$POD_JSON" "$DEFAULTS_JSON")" &&
 POD_JSON="$(jq -n "$EFFECTIVE_JSON | .effective")" &&
-POD_NET="$(jq -nr "$POD_JSON | .net")" &&
-POD_DNS="$(jq -nr "$POD_JSON | .dns")" &&
-POD_DNS_SEARCH="$(jq -nr "$POD_JSON | .\"dns-search\" | select(. != null)")" || exit 1
-DNS_SEARCH_OPT=
-[ ! "$POD_DNS_SEARCH" ] || DNS_SEARCH_OPT="--dns-search=$POD_DNS_SEARCH"
-
-POD_IP=
-runInfrastructureScript on-prepared
-
-RUNARGS="$(generateRunArgs --dns '.dns[]?')" || exit 1
-RUNARGS="$RUNARGS $(generateRunArgs --dns-search '."dns-search"[]?')" || exit 1
-if jq -ne "$POD_JSON | .\"inject-hosts\"" >/dev/null; then
-	RUNARGS="$RUNARGS $(generateRunArgs --hosts-entry '.services | keys? | .[]?' '127.0.0.1=')" || exit 1
-fi
+RKT_RUN_ARGS="$(generateRktRunArgs)" || exit 1
 
 if [ "$VERBOSE" ]; then
 	echo 'Effective configuration:'
 	jq -n "$EFFECTIVE_JSON | .effective"
 	printf 'Will now run rkt commands:\n%s\n' '  rkt prepare --quiet=true'
-	json2rkt "$POD_JSON" | xargs -0n1 | sed -E 's/^/    /g'
-	echo "  rkt run-prepared --hostname=$POD_HOSTNAME --net=$POD_NET $RUNARGS CONTAINER_UUID"
+	generateRktPrepareArgs | xargs -0 -n1 | sed -E 's/^/    /g'
+	echo "  rkt run-prepared $RKT_RUN_ARGS CONTAINER_UUID"
 fi
 
-POD_UUID="$(json2rkt "$POD_JSON" | xargs -0 rkt prepare --quiet=true)" &&
+POD_IP=
+runInfrastructureScript on-prepared || exit 1
+
+echo "$EFFECTIVE_JSON" | jq -r '[(.effective.volumes[]? | select(.kind == "host" and .readonly == false) | .source), ""] | join("\u0000")' | head -z -n -1 | xargs -0 -n1 mkdir -p 2>/dev/null
+POD_UUID="$(generateRktPrepareArgs | xargs -0 rkt prepare --quiet=true)" &&
 ([ ! -f "$POD_UUID_FILE" ] || /usr/bin/rkt rm --uuid-file="$POD_UUID_FILE" >/dev/null 2>/dev/null || true) && # Clean up old container
 echo "$POD_UUID" > "$POD_UUID_FILE" || exit 1
-rkt run-prepared --hostname="$POD_HOSTNAME" --net="$POD_NET" $RUNARGS "$POD_UUID" &
+rkt run-prepared $RKT_RUN_ARGS "$POD_UUID" &
 POD_PID=$!
 trap terminateGracefully 2 3 9 15
 trap reload 1
