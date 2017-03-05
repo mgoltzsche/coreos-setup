@@ -3,12 +3,16 @@
 	"dns": ["172.16.28.1"],
 	"dns-search": ["${pod_name}.service.dc1.consul", "service.dc1.consul"],
 	"inject-hosts": false,
-	"on-prepared": ["/opt/bin/wait-for-consul", "172.16.28.1"],
-	"on-started": ["/opt/bin/configure-consul", "172.16.28.1", "../consul/volumes/volume-consul-config"],
+	"on-prepared": ["/opt/bin/configure-consul", "await-consul", "172.16.28.1"],
+	"on-started": ["/opt/bin/configure-consul", "register", "172.16.28.1", "../consul/volumes/volume-consul-config"],
+	"on-checked": ["/opt/bin/configure-consul", "update", "172.16.28.1"],
+	"on-terminate": ["/opt/bin/configure-consul", "deregister", "172.16.28.1"],
 	"pods": {
 		"consul": {
 			"on-prepared": null,
-			"on-started": null
+			"on-started": null,
+			"on-checked": null,
+			"on-terminate": null
 		}
 	}
 }

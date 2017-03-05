@@ -58,7 +58,7 @@ configureNginxVirtualHosts() {
 			  include proxy_params.conf;
 
 			  location / {
-			    resolver $CONSUL_IP;
+			    resolver $CONSUL_IP valid=10s;
 			    # Variable required to let nginx not resolve hostname at boot time
 			    set \$service http://$SERVICE_ADDRESS;
 			    proxy_pass \$service;

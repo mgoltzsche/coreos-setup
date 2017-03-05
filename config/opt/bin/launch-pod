@@ -23,6 +23,9 @@ validatePodJSON() {
 	assertJSON "$POD_JSON" 0 '.services[]?.environment,.environment | keys? | .[]' '[a-zA-Z0-9_]+' &&
 	assertJSON "$POD_JSON" 1 '.services[]?.image | type' 'string' &&
 	assertJSON "$POD_JSON" 1 '.services[]?.image' '.+/.+' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck | select(. != null) | type' 'object' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck?.timeout' 'null|[0-9\.]+[dhms]?' &&
+	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck?.interval' 'null|([0-9\.]+[dhms]? ?)' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.http | keys? | .[]' 'port|protect|subdomain' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .port' '[0-9]+' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.http | select(. != null) | .protect | type' 'boolean|null' &&
@@ -88,7 +91,9 @@ generateEffectiveJSON() {
 		.effective.volumes[]?.source |= (if (startswith("/")) then . else ($pod_dir + "/" + .) end) |
 		.effective.volumes[]?.kind |= (if (. == null) then "host" else . end) |
 		.effective.volumes[]?.readonly |= (if (. == null) then false else . end) |
-		(.effective.services[]?.volumes? | select(. != null)) |= with_entries(.value = if (isfilevol(.value)) then tovolname(.key) else .value end)
+		(.effective.services[]?.volumes? | select(. != null)) |= with_entries(.value = if (isfilevol(.value)) then tovolname(.key) else .value end) |
+		(.effective.services[]?.healthcheck | select(. != null) | .timeout) |= (if (. == null) then "20s" else . end) |
+		(.effective.services[]?.healthcheck | select(. != null) | .interval) |= (if (. == null) then "30s" else . end)
 	' <<-EOF
 		{"pod": $1, "default": $2, "images": $FETCHED_IMAGE_MANIFESTS}
 	EOF
@@ -128,16 +133,67 @@ generateRktRunArgs() {
 	)' | xargs
 }
 
+initHealthChecks() {
+	jq -nre "$DEFAULTS_JSON | if (.pods.$POD_NAME_JSON | has(\"on-checked\")) then .pods.$POD_NAME_JSON else .\"on-checked\" end | select(. != null)" >/dev/null || return 0
+	CHECKS_JSON="$(echo "$POD_JSON" | jq -c '[.services? | to_entries? | .[] | select(.value.healthcheck != null) | {"app": .key, "cmd": .value.healthcheck.cmd, "timeout": .value.healthcheck.timeout, "interval": .value.healthcheck.interval}]')" &&
+	CHECK_COUNT="$(jq -n "$CHECKS_JSON | length")" || return 1
+	CHECK_INDEX=0
+	while [ $CHECK_INDEX -lt $CHECK_COUNT ]; do
+		CHECK_JSON=$CHECK_INDEX
+		CHECK_JSON="$(jq -ne "$CHECKS_JSON | .[$CHECK_INDEX]")" &&
+		CHECK_APP="$(jq -nre "$CHECK_JSON | .app")" &&
+		CHECK_TIMEOUT="$(jq -nre "$CHECK_JSON | .timeout")" &&
+		CHECK_INTERVAL="$(jq -nre "$CHECK_JSON | .interval")" \
+			|| (echo "Invalid/incomplete checkscript: $CHECK_JSON" >&2; false) || return 1
+		runHealthCheck "$CHECK_APP" "$CHECK_JSON" "$CHECK_TIMEOUT"
+		if [ $? -eq 0 ]; then
+			while true; do
+				sleep $CHECK_INTERVAL || exit 1
+				runHealthCheck "$CHECK_APP" "$CHECK_JSON" "$CHECK_TIMEOUT"
+			done &
+			CHECK_PIDS="$! $CHECK_PIDS"
+		else
+			echo "Health check handling for $CHECK_APP failed: $CHECK_JSON" >&2
+		fi
+		CHECK_INDEX="$(expr $CHECK_INDEX + 1)"
+	done
+}
+
+# Args: APP CHECKJSON TIMEOUT
+runHealthCheck() {
+	CHECK_APP="$1"
+	CHECK_JSON="$2"
+	CHECK_TIMEOUT="$3"
+	CHECK_CMD_JSON="$(jq -n "$CHECK_JSON | (.cmd + [\"#\"]) | join(\"\\u0000\")")"
+	CHECK_OUTPUT="$(jq -nr "$CHECK_CMD_JSON" | head -z -n -1 | xargs -0 timeout -s KILL "$CHECK_TIMEOUT" rkt enter --app="$CHECK_APP" "$POD_UUID" 2>&1)"
+	case $? in
+		0)
+			CHECK_STATUS=passing
+		;;
+		1)
+			CHECK_STATUS=warning
+		;;
+		*)
+			CHECK_STATUS=critical
+		;;
+	esac
+	runInfrastructureScript on-checked "$CHECK_APP" "$CHECK_STATUS" "$CHECK_OUTPUT"
+}
+
 runInfrastructureScript() {
 	SCRIPT_TYPE="$1"
+	shift
+	ARGS_JSON='[]'
+	while [ $# -gt 0 ]; do
+		ARGS_JSON="$(echo -n "$1" | jq -sR "$ARGS_JSON + [.]")"
+		shift
+	done
 	export POD_NAME
 	export EFFECTIVE_JSON
 	export POD_IP
-	(POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)"
-	cd "$POD_DIRECTORY" &&
-	# TODO: remove or make call whitespace safe
-	EXEC_SCRIPT="$(jq -nre "$DEFAULTS_JSON | if (.pods."$POD_NAME" | has(\"$SCRIPT_TYPE\")) then .pods.$POD_NAME_JSON.\"$SCRIPT_TYPE\"[]? else if (.\"$SCRIPT_TYPE\") then .\"$SCRIPT_TYPE\"[]? else \"/bin/true\" end end" | xargs)" &&
-	(sh -c "$EXEC_SCRIPT" || (echo "Error in $SCRIPT_TYPE script: $EXEC_SCRIPT" >&2; false))) || return 1
+	(cd "$POD_DIRECTORY" &&
+	jq -nre "$DEFAULTS_JSON | if (.pods.$POD_NAME_JSON | has(\"$SCRIPT_TYPE\")) then .pods.$POD_NAME_JSON.\"$SCRIPT_TYPE\" else if (.\"$SCRIPT_TYPE\") then .\"$SCRIPT_TYPE\" else [\"/bin/true\"] end end | (. + $ARGS_JSON + [\"#\"]) | join(\"\\u0000\")" |
+	head -z -n -1 | xargs -0 sh || (echo "Error in $SCRIPT_TYPE script" >&2; false)) || return 1
 }
 
 podip() {
@@ -166,6 +222,8 @@ reload() {
 
 terminateGracefully() {
 	trap : 2 3 9 15
+	kill -15 $CHECK_PIDS 2>/dev/null
+	runInfrastructureScript on-terminate
 	kill -15 "$POD_PID" 2>/dev/null
 	for SEC in 1 1 3 3 5 10; do
 		ps "$POD_PID" >/dev/null || exit "${1:-0}"
@@ -204,6 +262,7 @@ shift
 shift
 [ ! -z "$POD_FILE" -a ! -z "$POD_NAME" -a $# -eq 0 ] || usage
 
+POD_NAME_JSON="$(echo "$POD_NAME" | jq -R .)" &&
 DEFAULTS_JSON="$([ ! -f "$DEFAULTS_FILE" ] || cat "$DEFAULTS_FILE")" &&
 DEFAULTS_JSON="${DEFAULTS_JSON:-\{\}}" &&
 POD_DIRECTORY="$(readlink -m "$(dirname "$POD_FILE")")" &&
@@ -236,8 +295,10 @@ POD_PID=$!
 trap terminateGracefully 2 3 9 15
 trap reload 1
 POD_IP="$(podip)" &&
-runInfrastructureScript on-started || terminateGracefully 1
+runInfrastructureScript on-started &&
+sleep 1 &&
+initHealthChecks || terminateGracefully 1
 unset EFFECTIVE_JSON
-unset DEFAULTS_JSON
 unset POD_JSON
 wait
+terminateGracefully

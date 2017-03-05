@@ -16,15 +16,15 @@
 				"protect": false,
 				"subdomain": ""
 			},
-			"checks": [
-				{"port": 80},
-				{"url": "http://127.0.0.1/health"},
-				{"run": "nc..."}
-			]
+			"healthcheck": {
+				"cmd": ["curl", "-q", "http://localhost"],
+				"http": "http://localhost",
+				"timeout": "10s"
+			}
 		},
 		"hello": {
 			"image": "docker://alpine",
-			"exec": [ "/usr/bin/nc", "-lk", "0.0.0.0", "8080", "-e", "echo", "Hello", "$NAME" ],
+			"exec": [ "/usr/bin/nc", "-lk", "0.0.0.0", "-p", "8080", "-e", "echo", "Hello", "$NAME" ],
 			"environment": {
 				"NAME": "world overwritten",
 				"VAL2": "cccc"
@@ -32,6 +32,11 @@
 			"http": {
 				"port": 8080,
 				"protect": true
+			},
+			"healthcheck": {
+				"cmd": ["nc", "-zvw1", "127.0.0.1", "8080"],
+				"interval": "30s",
+				"timeout": "10s"
 			}
 		}
 	}

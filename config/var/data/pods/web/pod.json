@@ -17,6 +17,11 @@
 				"/etc/nginx/proxy_params.conf": "./proxy_params.conf",
 				"/etc/nginx/conf.d": "volume-etc-nginx-conf-d",
 				"/bin/configure-hosts": "./configure-hosts"
+			},
+			"healthcheck": {
+				"cmd": ["wget", "-qO", "-", "http://localhost"],
+				"http": "http://localhost",
+				"timeout": "10s"
 			}
 		}
 	},
