@@ -17,7 +17,7 @@ waitForConsulAgent() {
 		wget -qO - "http://consul:8500/v1/kv/?keys" >/dev/null 2>/dev/null && return 0
 		sleep $SEC
 	done
-	echo "Consul unavailable" >&2
+	echo "consul unavailable" >&2
 	exit 1
 }
 
@@ -130,7 +130,7 @@ configureNginxVirtualHosts() {
 }
 
 if [ "$1" = server ]; then
-	configureNginxVirtualHosts &&
+	configureNginxVirtualHosts || exit 1
 	nc -lk -s "$LISTENHOST" -p "$LISTENPORT" -e "$0" &
 else
 	waitForNginx &&

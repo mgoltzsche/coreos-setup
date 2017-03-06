@@ -145,7 +145,7 @@ initHealthChecks() {
 		CHECK_TIMEOUT="$(jq -nre "$CHECK_JSON | .timeout")" &&
 		CHECK_INTERVAL="$(jq -nre "$CHECK_JSON | .interval")" \
 			|| (echo "Invalid/incomplete checkscript: $CHECK_JSON" >&2; false) || return 1
-		runHealthCheck "$CHECK_APP" "$CHECK_JSON" "$CHECK_TIMEOUT"
+		runHealthCheck "$CHECK_APP" "$CHECK_JSON" "$CHECK_TIMEOUT" || return 1
 		if [ $? -eq 0 ]; then
 			while true; do
 				sleep $CHECK_INTERVAL || exit 1
