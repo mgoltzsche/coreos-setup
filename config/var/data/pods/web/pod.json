@@ -1,8 +1,10 @@
 {
 	"services": {
 		"nginx": {
-			"image": "docker://nginx:1.11-alpine",
-			"exec": [ "/bin/sh", "-c", "/bin/configure-hosts server 0.0.0.0 9090 && nginx -g \"daemon off;\"" ],
+			"image": ".",
+			"environment": {
+				"ADMIN_EMAIL": "max.goltzsche@gmail.com"
+			},
 			"ports": [
 				{
 					"name": "80-tcp",
@@ -12,22 +14,11 @@
 					"port": 443
 				}
 			],
-			"volumes": {
-				"/etc/nginx/nginx.conf": "./nginx.conf",
-				"/etc/nginx/proxy_params.conf": "./proxy_params.conf",
-				"/etc/nginx/conf.d": "volume-etc-nginx-conf-d",
-				"/bin/configure-hosts": "./configure-hosts"
-			},
 			"healthcheck": {
-				"cmd": ["wget", "-qO", "-", "http://localhost"],
-				"http": "http://localhost",
+				"cmd": ["wget", "-qO", "-", "-U", "healthcheck", "http://localhost/health"],
+				"http": "http://localhost/health",
 				"timeout": "10s"
 			}
-		}
-	},
-	"volumes": {
-		"volume-etc-nginx-conf-d": {
-			"source": "./volumes/volume-etc-nginx-conf-d"
 		}
 	}
 }

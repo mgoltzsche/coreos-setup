@@ -22,7 +22,7 @@ validatePodJSON() {
 	assertJSON "$POD_JSON" 1 '.services | keys? | .[]' '[a-zA-Z0-9_-]+' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.environment,.environment | keys? | .[]' '[a-zA-Z0-9_]+' &&
 	assertJSON "$POD_JSON" 1 '.services[]?.image | type' 'string' &&
-	assertJSON "$POD_JSON" 1 '.services[]?.image' '.+/.+' &&
+	#assertJSON "$POD_JSON" 1 '.services[]?.image' '.+/.+' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck | select(. != null) | type' 'object' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck?.timeout' 'null|[0-9\.]+[dhms]?' &&
 	assertJSON "$POD_JSON" 0 '.services[]?.healthcheck?.interval' 'null|([0-9\.]+[dhms]? ?)' &&
@@ -58,40 +58,71 @@ assertJSON() {
 	fi
 }
 
+JQ_FILE_PATH_FUNCTIONS='
+	def tosimplename(f): (f |
+		ascii_downcase? | explode? |
+		map(if ((. > 47 and . < 58) or (. > 96 and . < 123)) then . else 45 end) |
+		reduce .[] as $char (
+			{"result":[],"last":45};
+			if ($char == 45 and .last == 45)
+			then .
+			else {"result": (.result + [$char]), "last": $char}
+			end
+		) | .result | implode | ltrimstr("-") | rtrimstr("-")
+	);
+	def isfile(v): v? | startswith("../") or startswith("./") or startswith("/") or (. == ".");
+	def tovolname(f): "volume-" + tosimplename(f);
+	def toimagename(i): i | if (isfile(.)) then ("local/" + $pod_name + (tosimplename(.) | if (. == "") then "" else ("-" + .) end) + ":latest") else . end;
+'
+
+# Args: PODJSON PODDIRECTORY
+buildDockerImages() {
+	for IMAGE2BUILD in $(echo "$1" | jq -r --arg pod_name "$POD_NAME" "$JQ_FILE_PATH_FUNCTIONS"' .services[] | select(isfile(.image)) | .image | (toimagename(.) + "=" + .)'); do
+		echo "Building docker image $IMAGE2BUILD ..." >&2
+		BUILD_IMG_NAME="$(echo "$IMAGE2BUILD" | cut -d '=' -f 1)"
+		BUILD_DIR="$(echo "$IMAGE2BUILD" | sed -E 's/^.*?=//')"
+		echo "$BUILD_DIR" | grep -Eq '^/' || BUILD_DIR="$2/$BUILD_DIR"
+		IMAGE_FILE_NAME="$(echo "$BUILD_IMG_NAME" | sed -E 's/[^a-z0-9\-]+/-/g')"
+		DOCKER_IMAGE_FILE="${IMAGE_FILE_NAME}.tar"
+		ACI_FILE="$BUILD_DIR/${IMAGE_FILE_NAME}.aci"
+		(
+			cd "$BUILD_DIR" &&
+			docker build -t "$BUILD_IMG_NAME" --rm . &&
+			docker save "$BUILD_IMG_NAME" > "$DOCKER_IMAGE_FILE" &&
+			docker2aci "$DOCKER_IMAGE_FILE" &&
+			TMP_CONTAINER_UUID="$(rkt prepare --quiet=true --insecure-options=image "$ACI_FILE")" #&&
+			rkt rm "$TMP_CONTAINER_UUID" # Prepare container to import image. TODO: simply import image when supported by rkt
+			STATUS=$?
+			#docker rmi -f "$BUILD_IMG_NAME"
+			rm -f "$DOCKER_IMAGE_FILE" "$ACI_FILE"
+			exit $STATUS
+		)
+	done
+}
+
 generateEffectiveJSON() {
 	# TODO: make cat-manifest call safe
 	FETCHED_IMAGE_MANIFESTS='{}'
-	for IMAGE_REF in $(jq -nr "$1 | .services[]?.image"); do
+	for IMAGE_REF in $(echo "$1" | jq -r --arg pod_name "$POD_NAME" "$JQ_FILE_PATH_FUNCTIONS"' .services[] | toimagename(.image)'); do
 		IMAGE_FETCH_OPTIONS=
-		! echo "$IMAGE_REF" | grep -Eq '^docker://' || IMAGE_FETCH_OPTIONS='--insecure-options=image'
+		! echo "$IMAGE_REF" | grep -Eq '^(docker://|local/)' || IMAGE_FETCH_OPTIONS='--insecure-options=image'
 		FETCHED_IMAGE_ID="$(rkt fetch $IMAGE_FETCH_OPTIONS "$IMAGE_REF")" || (echo "Cannot fetch image: $IMAGE_REF" >&2; false) || return 1
 		FETCHED_IMAGE_MANIFEST="$(rkt image cat-manifest "$FETCHED_IMAGE_ID")" &&
 		FETCHED_IMAGE_MANIFESTS="$(jq -n "$FETCHED_IMAGE_MANIFESTS + {\"$IMAGE_REF\": $FETCHED_IMAGE_MANIFEST}")" || return 1
 	done
-	jq --arg pod_name "$POD_NAME" --arg pod_dir "$POD_DIRECTORY" '
-		def isfilevol(v): v | startswith("../") or startswith("./") or startswith("/");
-		def tovolname(p): "volume-" + (p |
-			ascii_downcase? | explode? |
-			map(if ((. > 47 and . < 58) or (. > 96 and . < 123)) then . else 45 end) |
-			reduce .[] as $char (
-				{"result":[],"last":0};
-				if ($char == 45 and .last == 45)
-				then .
-				else {"result": (.result + [$char]), "last": $char}
-				end
-			) | .result | implode | ltrimstr("-") | rtrimstr("-")
-		);
+	jq --arg pod_name "$POD_NAME" --arg pod_dir "$POD_DIRECTORY" "
+		$JQ_FILE_PATH_FUNCTIONS"'
 		.effective += {"net": "default", "dns": ["host"], "inject-hosts": true} |
 		.effective += (.default | with_entries(select(.key == ["net", "dns", "dns-search", "inject-hosts"][]))) |
 		.effective += .pod |
 		.effective.volumes = (reduce .images[]?.app?.mountPoints[]? as $item ({}; . + {($item.name): {"source": ("./volumes/" + $item.name), "kind": "host", "readonly": false}})) |
 		.effective.volumes += .default.volumes |
-		.effective.volumes += (reduce (.effective.services[]?.volumes? | to_entries? | .[]? | select(isfilevol(.value))) as $e ({}; . + {(tovolname($e.key)): {"source": $e.value, "kind": "host", "readonly": true}})) |
+		.effective.volumes += (reduce (.effective.services[]?.volumes? | to_entries? | .[]? | select(isfile(.value))) as $e ({}; . + {(tovolname($e.key)): {"source": $e.value, "kind": "host", "readonly": true}})) |
 		.effective.volumes += .pod.volumes |
 		.effective.volumes[]?.source |= (if (startswith("/")) then . else ($pod_dir + "/" + .) end) |
 		.effective.volumes[]?.kind |= (if (. == null) then "host" else . end) |
 		.effective.volumes[]?.readonly |= (if (. == null) then false else . end) |
-		(.effective.services[]?.volumes? | select(. != null)) |= with_entries(.value = if (isfilevol(.value)) then tovolname(.key) else .value end) |
+		(.effective.services[]?.volumes? | select(. != null)) |= with_entries(.value = if (isfile(.value)) then tovolname(.key) else .value end) |
 		(.effective.services[]?.healthcheck | select(. != null) | .timeout) |= (if (. == null) then "20s" else . end) |
 		(.effective.services[]?.healthcheck | select(. != null) | .interval) |= (if (. == null) then "30s" else . end)
 	' <<-EOF
@@ -104,7 +135,8 @@ generateEffectiveJSON() {
 
 # TODO: restrict by ports defined for pod in defaults if defaults defined
 generateRktPrepareArgs() {
-	echo "$EFFECTIVE_JSON" | jq -r '
+	echo "$EFFECTIVE_JSON" | jq -r --arg pod_name "$POD_NAME" "
+		$JQ_FILE_PATH_FUNCTIONS"'
 		[.images[].app?.ports[]?] as $availPorts |
 		[
 			([if (.effective.services[]?.image | startswith("docker://")) then "--insecure-options=image" else empty end][0] | select(. != null)),
@@ -112,11 +144,13 @@ generateRktPrepareArgs() {
 			(.effective.environment? | to_entries? | .[]? | ("--set-env=" + .key + "=" + .value)),
 			(.effective.services[]?.ports[]? | ("--port=" + .name + (if (.ip) then (":" + .ip) else "" end) + ":" + (.port | tostring))),
 			(.effective.services? | to_entries? | .[]? | (
-				(.value.image),
+				toimagename(.value.image),
 				("--name=" + .key),
 				(.value.environment? | to_entries? | .[]? | ("--environment=" + .key + "=" + .value)),
 				(.value.volumes? | to_entries? | .[]? | ("--mount=volume=" + .value + ",target=" + .key)),
-				(if ((.value.exec | length) > 0) then (("--exec=" + .value.exec[0]), "--", (.value.exec[1:][])) else "--" end),
+				(if ((.value.exec | length) > 0)
+					then (("--exec=" + .value.exec[0]), "--", (.value.exec[1:][]))
+					else "--" end),
 				"---"
 			))
 		] | join("\u0000")' | head -z -n -1
@@ -166,7 +200,8 @@ runHealthCheck() {
 	CHECK_TIMEOUT="$3"
 	CHECK_CMD_JSON="$(jq -n "$CHECK_JSON | (.cmd + [\"#\"]) | join(\"\\u0000\")")"
 	CHECK_OUTPUT="$(jq -nr "$CHECK_CMD_JSON" | head -z -n -1 | xargs -0 timeout -s KILL "$CHECK_TIMEOUT" rkt enter --app="$CHECK_APP" "$POD_UUID" 2>&1)"
-	case $? in
+	CHECK_STATUS=$?
+	case $CHECK_STATUS in
 		0)
 			CHECK_STATUS=passing
 		;;
@@ -177,9 +212,11 @@ runHealthCheck() {
 			CHECK_STATUS=critical
 		;;
 	esac
+	! [ $CHECK_STATUS = critical -a -z "$CHECK_OUTPUT" ] || CHECK_OUTPUT="Check exited with status code $CHECK_STATUS"
 	runInfrastructureScript on-checked "$CHECK_APP" "$CHECK_STATUS" "$CHECK_OUTPUT"
 }
 
+# Args: SCRIPTTYPE [ARG1, [ARG2, ...]]
 runInfrastructureScript() {
 	SCRIPT_TYPE="$1"
 	shift
@@ -235,7 +272,6 @@ terminateGracefully() {
 }
 
 
-
 DEFAULTS_FILE=
 POD_FILE=
 POD_NAME=
@@ -271,6 +307,7 @@ POD_JSON="$(cat "$POD_FILE")" &&
 POD_USER="$(stat -c '%U' "$POD_FILE")" &&
 POD_GROUP="$(stat -c '%U' "$POD_FILE")" &&
 validatePodJSON "$POD_JSON" &&
+buildDockerImages "$POD_JSON" "$POD_DIRECTORY" &&
 EFFECTIVE_JSON="$(generateEffectiveJSON "$POD_JSON" "$DEFAULTS_JSON")" &&
 POD_JSON="$(jq -n "$EFFECTIVE_JSON | .effective")" &&
 RKT_RUN_ARGS="$(generateRktRunArgs)" || exit 1
