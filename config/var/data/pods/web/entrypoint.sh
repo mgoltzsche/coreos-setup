@@ -243,6 +243,7 @@ else
 	nginx -g "daemon off;" &
 	NGINX_PID=$!
 fi
+# TODO: renew certificates
 waitForNginxLoaded &&
 obtainSSLCertificates &&
 configureNginxVirtualHosts || terminateGracefully 1 # 2nd pass with obtained certificates

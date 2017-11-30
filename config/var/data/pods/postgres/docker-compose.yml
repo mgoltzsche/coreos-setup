@@ -1,0 +1,9 @@
+version: '2'
+services:
+  postgres:
+    image: algorythm/postgres:latest
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      PG_USER_POSTGRES: "${POSTGRES_PASSWORD}"

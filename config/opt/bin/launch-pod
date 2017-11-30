@@ -167,6 +167,21 @@ generateRktRunArgs() {
 	)' | xargs
 }
 
+yaml2json() {
+	# TODO: Do conversion not within container but directly with jq when supported (https://github.com/stedolan/jq/issues/467)
+	#printf 'test:\n  prop1: a\n  prop2: b\n' | 
+	rkt run --stage1-name=coreos.com/rkt/stage1-fly:1.25.0 --insecure-options=image docker://ruby:2-alpine \
+		--exec=/usr/local/bin/ruby -- -ryaml -rjson -e 'puts JSON.pretty_generate(YAML.load(ARGF))'
+}
+
+# Args: COMPOSEFILE
+compose2json() {
+	COMPOSE_JSON="$(cat - | yaml2json)" || (echo 'Cannot read docker compose file' >&2; false) || exit 1
+	echo "$COMPOSE_JSON"
+	#jq -n "$COMPOSE_JSON"' | {"services": .}'
+	# TODO: Extract supported information / convert to pod.json
+}
+
 initHealthChecks() {
 	jq -nre "$DEFAULTS_JSON | if (.pods.$POD_NAME_JSON | has(\"on-checked\")) then .pods.$POD_NAME_JSON else .\"on-checked\" end | select(. != null)" >/dev/null || return 0
 	CHECKS_JSON="$(echo "$POD_JSON" | jq -c '[.services? | to_entries? | .[] | select(.value.healthcheck != null) | {"app": .key, "cmd": .value.healthcheck.cmd, "timeout": .value.healthcheck.timeout, "interval": .value.healthcheck.interval}]')" &&
@@ -303,7 +318,13 @@ DEFAULTS_JSON="$([ ! -f "$DEFAULTS_FILE" ] || cat "$DEFAULTS_FILE")" &&
 DEFAULTS_JSON="${DEFAULTS_JSON:-\{\}}" &&
 POD_DIRECTORY="$(readlink -m "$(dirname "$POD_FILE")")" &&
 POD_UUID_FILE="/var/run/pod-${POD_NAME}.uuid" && # todo
-POD_JSON="$(cat "$POD_FILE")" &&
+POD_JSON="$(cat "$POD_FILE")" || exit 1
+
+if echo "$POD_FILE" | grep -Eq '\.yml$'; then
+	POD_JSON="$(echo "$POD_JSON" | compose2json)" || exit 1
+fi
+
+
 POD_USER="$(stat -c '%U' "$POD_FILE")" &&
 POD_GROUP="$(stat -c '%U' "$POD_FILE")" &&
 validatePodJSON "$POD_JSON" &&
